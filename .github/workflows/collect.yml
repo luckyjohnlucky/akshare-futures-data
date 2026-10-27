@@ -3,10 +3,11 @@ name: Collect PVC futures data
 on:
   workflow_dispatch:
   schedule:
-    # Weekdays 15:01-15:31 Beijing time (UTC-8=UTC+8: 07:01-07:31),
-    # retry every 5 minutes until data meets date+quality requirements.
-    - cron: '1,6,11,16,21,26,31 7 * * 1-5'
-
+    # 北京时间工作日 15:01-15:56，每 5 分钟重试
+    - cron: '1,6,11,16,21,26,31,36,41,46,51,56 7 * * 1-5'
+    # 北京时间 16:01 再做最后一次检查
+    - cron: '1 8 * * 1-5'
+    
 permissions:
   contents: write
 
