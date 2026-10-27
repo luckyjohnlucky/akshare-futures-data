@@ -221,15 +221,116 @@ def json_to_csv(json_path, csv_path):
         raise ValueError(f"JSON 数组为空，无法生成 CSV：{json_path}")
 
     temp_path = csv_path.with_name(csv_path.name + ".tmp")
-    with temp_path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=fieldnames, extrasaction="ignore"
-        )
-        writer.writeheader()
-        for item in rows:
-            writer.writerow(item)
-    temp_path.replace(csv_path)
+    try:
+        with temp_path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(
+                f, fieldnames=fieldnames, extrasaction="ignore"
+            )
+            writer.writeheader()
+            for item in rows:
+                writer.writerow(item)
+        temp_path.replace(csv_path)
+    except Exception:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+        raise
     return len(rows)
+
+
+def json_matches_csv(json_path, csv_path):
+    """
+    Check whether the CSV file is a faithful derivation of the JSON file.
+
+    Compares:
+    - record count
+    - field collection (union of JSON keys) MUST equal CSV header field set
+    - no duplicate field names in CSV header
+    - per-record values (in order), with JSON None mapped to CSV empty string
+    - every CSV record must have exactly the same field set (no extra/missing)
+
+    This is NOT a cross-file atomic transaction; it is a consistency checkpoint.
+    """
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+
+    if not isinstance(raw, list):
+        return False
+
+    # Check every JSON item is a dict before proceeding
+    json_fields = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            return False
+        json_fields.update(item.keys())
+
+    try:
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            csv_fieldnames = reader.fieldnames
+            csv_records = list(reader)
+    except (FileNotFoundError, OSError):
+        return False
+
+    # If JSON is empty but CSV has data, they don't match
+    if not raw and csv_records:
+        return False
+
+    # Empty JSON and empty CSV (no header, no data) -> consistent
+    if not raw and not csv_records and csv_fieldnames is None:
+        return True
+
+    # Empty JSON with proper CSV header (no data rows) -> consistent
+    if not raw and not csv_records and csv_fieldnames is not None:
+        return True
+
+    # CSV header must exist
+    if csv_fieldnames is None:
+        return False
+
+    # Check for duplicate field names in CSV header
+    if len(csv_fieldnames) != len(set(csv_fieldnames)):
+        return False
+
+    # CSV header field set must exactly match JSON field set
+    csv_field_set = set(csv_fieldnames)
+    if json_fields != csv_field_set:
+        return False
+
+    # Record count must match
+    if len(raw) != len(csv_records):
+        return False
+
+    # Compare every record value (in order), with strict field set per row
+    for json_item, csv_row in zip(raw, csv_records):
+        # csv.DictReader puts extra columns under None key (restkey) or
+        # missing columns get None. Check row field count matches header.
+        # None key in csv_row means extra columns were found
+        if None in csv_row:
+            return False
+
+        # Check for None values (missing fields in CSV row)
+        for key in json_fields:
+            if csv_row.get(key) is None:
+                return False
+
+        for key in json_fields:
+            json_val = json_item.get(key)
+            csv_val = csv_row.get(key, "")
+            # Map JSON None to CSV empty string for comparison
+            if json_val is None:
+                json_str = ""
+            else:
+                json_str = str(json_val)
+            csv_str = str(csv_val) if csv_val is not None else ""
+            if json_str != csv_str:
+                return False
+
+    return True
 
 
 def update_daily_bars(df):
@@ -279,11 +380,19 @@ def update_daily_bars(df):
     )
 
     temp_path = DAILY_BARS.with_suffix(".json.tmp")
-    temp_path.write_text(
-        json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    temp_path.replace(DAILY_BARS)
+    try:
+        temp_path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(DAILY_BARS)
+    except Exception:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+        raise
     return len(result)
 
 
@@ -519,21 +628,50 @@ def update_minute_bars(symbol, df):
     merged = sorted(records.values(), key=lambda x: (x["symbol"], x["datetime"]))
     merged = filter_future_anomalies(merged)
     temp_path = MINUTE_BARS.with_suffix(".json.tmp")
-    with temp_path.open("w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2, allow_nan=False)
-        f.write("\n")
-    temp_path.replace(MINUTE_BARS)
+    try:
+        with temp_path.open("w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2, allow_nan=False)
+            f.write("\n")
+        temp_path.replace(MINUTE_BARS)
+    except Exception:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+        raise
     return len(data), len(merged)
 
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
+
+    # Pre-flight: rebuild CSV if existing JSON/CSV are inconsistent.
+    # JSON is the authoritative data source; CSV is a regenerable derivation.
+    for json_file, csv_file, label in [
+        (MINUTE_BARS, MINUTE_BARS_CSV, "分钟线"),
+        (DAILY_BARS, DAILY_BARS_CSV, "日线"),
+    ]:
+        if json_file.exists() and (
+            not csv_file.exists() or not json_matches_csv(json_file, csv_file)
+        ):
+            print(f"[修复] {label} CSV 缺失或与 JSON 不一致，重新生成中...")
+            try:
+                json_to_csv(json_file, csv_file)
+            except Exception as exc:
+                print(f"错误：{label} CSV 重建失败: {exc}，路径 {csv_file}；"
+                      f"JSON 保持有效，CSV 可在下次运行时重试。")
+                raise SystemExit(1)
 
     # 1. 获取并保存指定合约分钟线
     minute_df = ak.futures_zh_minute_sina(symbol="V2701", period="1")
     if minute_df is None or minute_df.empty:
         raise RuntimeError("分钟数据为空，停止更新。")
     updated, total = update_minute_bars("V2701", minute_df)
-    json_to_csv(MINUTE_BARS, MINUTE_BARS_CSV)
+    try:
+        json_to_csv(MINUTE_BARS, MINUTE_BARS_CSV)
+    except Exception as exc:
+        print(f"错误：分钟线 CSV 生成失败: {exc}；JSON 已更新，CSV 可重建。")
+        raise SystemExit(1)
     print(f"分钟线：本次校验 {updated} 条；文件累计 {total} 条；路径 {MINUTE_BARS}；CSV {MINUTE_BARS_CSV}")
 
     # 2. 获取并更新连续合约日线
@@ -548,5 +686,9 @@ if __name__ == "__main__":
 
     validated = validate_daily_bars(daily_df)
     count = update_daily_bars(validated)
-    json_to_csv(DAILY_BARS, DAILY_BARS_CSV)
+    try:
+        json_to_csv(DAILY_BARS, DAILY_BARS_CSV)
+    except Exception as exc:
+        print(f"错误：日线 CSV 生成失败: {exc}；JSON 已更新，CSV 可重建。")
+        raise SystemExit(1)
     print(f"日线：本次校验 {len(validated)} 条；更新结果 {count}；路径 {DAILY_BARS}；CSV {DAILY_BARS_CSV}")

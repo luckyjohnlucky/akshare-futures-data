@@ -1,0 +1,83 @@
+name: Collect PVC futures data
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekdays 15:01-15:31 Beijing time (UTC-8=UTC+8: 07:01-07:31),
+    # retry every 5 minutes until data meets date+quality requirements.
+    - cron: '1,6,11,16,21,26,31 7 * * 1-5'
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install holidays
+
+      - name: Fetch latest bars (real akshare collection)
+        run: python fetch_pvc.py
+
+      - name: Gate: trade-day + date/quality check
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import json
+          import sys
+          from pathlib import Path
+
+          import holidays
+
+          tz = dt.timezone(dt.timedelta(hours=8))  # Asia/Shanghai
+          today = dt.date.today()
+          today_str = today.isoformat()
+
+          # Skip weekends and Chinese public holidays.
+          if today.weekday() >= 5:
+              print(f"SKIP: weekend ({today_str})")
+              sys.exit(0)
+          if today in holidays.country_holidays("CN", years=today.year):
+              print(f"SKIP: Chinese public holiday ({today_str})")
+              sys.exit(0)
+
+          # Date requirement: latest daily bar must be today (Beijing).
+          daily = json.loads(Path("output/daily_bars.json").read_text(encoding="utf-8"))
+          latest = daily[-1]["trading_date"]
+          bj_today = dt.datetime.now(tz).date().isoformat()
+          if latest != bj_today:
+              # Data not yet ready; do not commit, retry on next scheduled run.
+              print(f"SKIP: data not ready (latest trading_date={latest}, today={bj_today})")
+              sys.exit(0)
+
+          print(f"READY: latest trading_date={latest} (today={bj_today})")
+          Path("DO_COMMIT").touch()
+          PY
+
+      - name: Commit and push data update
+        if: hashFiles('DO_COMMIT') != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/minute_bars.json output/minute_bars.csv \
+                 output/daily_bars.json output/daily_bars.csv \
+                 output/minute_data_quality.jsonl
+          if git diff --quiet --cached; then
+            echo "No data changes; nothing to commit."
+            exit 0
+          fi
+          git commit -m "chore: auto-refresh PVC futures data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push

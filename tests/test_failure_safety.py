@@ -5,8 +5,8 @@
 output/minute_bars.json、output/minute_bars.csv 以及
 output/minute_data_quality.jsonl 不能被清空、截断或意外覆盖。
 
-这些测试直接作用于**真实** output 文件（只读快照前后比对），
-且所有异常场景均在原子写盘之前终止，因此不会修改正式数据。
+这些测试使用**临时目录**模拟正式输出路径，所有快照比对在隔离环境下进行，
+绝不读写正式数据文件。
 """
 
 import csv
@@ -14,8 +14,8 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 import unittest
-from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -88,12 +88,44 @@ def run_main_minute_block():
 
 class InterfaceFailureSafetyTests(unittest.TestCase):
     def setUp(self):
+        """Redirect all output paths to an isolated temp directory."""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+        # Save original paths
+        self._orig = {
+            "MINUTE_BARS": m.MINUTE_BARS,
+            "MINUTE_BARS_CSV": m.MINUTE_BARS_CSV,
+            "QUALITY_LOG": m.QUALITY_LOG,
+            "OUT": m.OUT,
+        }
+
+        # Redirect to temp
+        m.OUT = self.dir
+        m.MINUTE_BARS = self.dir / "minute_bars.json"
+        m.MINUTE_BARS_CSV = self.dir / "minute_bars.csv"
+        m.QUALITY_LOG = self.dir / "minute_data_quality.jsonl"
+
+        # Create minimal files so snapshot() works
+        if not m.MINUTE_BARS.exists():
+            m.MINUTE_BARS.write_text("[]", encoding="utf-8")
+        if not m.MINUTE_BARS_CSV.exists():
+            m.MINUTE_BARS_CSV.write_text("", encoding="utf-8")
+        if not m.QUALITY_LOG.exists():
+            m.QUALITY_LOG.write_text("", encoding="utf-8")
+
         self.before = snapshot()
 
     def tearDown(self):
         after = snapshot()
         self.assertEqual(self.before, after,
                          "接口异常路径意外修改了正式行情/质控文件！")
+
+        # Restore original paths
+        for attr, path in self._orig.items():
+            setattr(m, attr, path)
+
+        self.tmp.cleanup()
 
     def test_interface_raises_propagates_and_files_intact(self):
         """接口抛出异常 → 异常向上抛出，未写入任何文件。"""
