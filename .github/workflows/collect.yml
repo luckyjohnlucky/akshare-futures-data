@@ -58,8 +58,7 @@ jobs:
           # Date requirement: latest daily bar must be today (Beijing).
           daily = json.loads(Path("output/daily_bars.json").read_text(encoding="utf-8"))
           latest = daily[-1]["trading_date"]
-          bj_today = dt.datetime.now(tz).date().isoformat()
-          if latest != bj_today:
+          if latest != bj_today.isoformat():
               # Data not yet ready; do not commit, retry on next scheduled run.
               print(f"SKIP: data not ready (latest trading_date={latest}, today={bj_today})")
               sys.exit(0)
