@@ -43,7 +43,8 @@ jobs:
           import holidays
 
           tz = dt.timezone(dt.timedelta(hours=8))  # Asia/Shanghai
-          today = dt.date.today()
+          bj_today = dt.datetime.now(tz).date()
+          today = bj_today
           today_str = today.isoformat()
 
           # Skip weekends and Chinese public holidays.
