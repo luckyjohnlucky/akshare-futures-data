@@ -1,0 +1,30 @@
+# Python environment
+.venv/
+
+# Bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Transient / temp
+*.tmp
+*.log
+
+# Local backups produced by this workflow
+backup_*/
+fetch_pvc.py.backup_*
+
+# High-churn personal snapshots (not for the repo)
+output/realtime_snapshots.jsonl
+
+# Stale root-level duplicates (canonical data lives under output/)
+/daily_bars.csv
+/minute_bars.csv
+/daily_bars_2026.json
+
+# Secrets / credentials
+.env
+*.pem
+*.key
+credentials.json
