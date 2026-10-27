@@ -32,7 +32,7 @@ jobs:
       - name: Fetch latest bars (real akshare collection)
         run: python fetch_pvc.py
 
-      - name: Gate: trade-day + date/quality check
+      - name: "Gate: trade-day + date/quality check"
         run: |
           python - <<'PY'
           import datetime as dt
