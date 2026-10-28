@@ -3,11 +3,16 @@ name: Collect PVC futures data
 on:
   workflow_dispatch:
   schedule:
-    # Day session Beijing 09:00-15:00 → UTC 01:00-07:00 (Mon-Fri)
-    - cron: '*/5 1-7 * * 1-5'
-    # Night session Beijing 21:00-23:00 → UTC 13:00-15:00 (UTC Sun-Thu = Beijing Mon-Fri)
+    # Day session morning: Beijing 09:00–11:40 (UTC 01:00–03:40), Mon-Fri
+    - cron: '*/5 1-2 * * 1-5'
+    - cron: '0,5,10,15,20,25,30,35,40 3 * * 1-5'
+    # Day session afternoon: Beijing 13:30–15:10 (UTC 05:30–07:10), Mon-Fri
+    - cron: '30,35,40,45,50,55 5 * * 1-5'
+    - cron: '*/5 6 * * 1-5'
+    - cron: '0,5,10 7 * * 1-5'
+    # Night session: Beijing 21:00–23:10 (UTC 13:00–15:10), Mon-Fri (UTC Sun-Thu)
     - cron: '*/5 13-14 * * 0-4'
-    - cron: '0 15 * * 0-4'
+    - cron: '0,5,10 15 * * 0-4'
 
 permissions:
   contents: write
