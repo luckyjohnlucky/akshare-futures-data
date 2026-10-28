@@ -1,6 +1,9 @@
 # Python environment
 .venv/
 
+# macOS
+.DS_Store
+
 # Bytecode / caches
 __pycache__/
 *.py[cod]
@@ -15,8 +18,8 @@ __pycache__/
 backup_*/
 fetch_pvc.py.backup_*
 
-# High-churn personal snapshots (not for the repo)
-output/realtime_snapshots.jsonl
+# Real-time snapshots are tracked for traceability and freshness validation.
+# output/realtime_snapshots.jsonl  -- previously ignored; now tracked.
 
 # Stale root-level duplicates (canonical data lives under output/)
 /daily_bars.csv

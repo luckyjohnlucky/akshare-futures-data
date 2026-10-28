@@ -3,11 +3,11 @@ name: Collect PVC futures data
 on:
   workflow_dispatch:
   schedule:
-    # 北京时间工作日 15:01-15:56，每 5 分钟重试
-    - cron: '1,6,11,16,21,26,31,36,41,46,51,56 7 * * 1-5'
-    # 北京时间 16:01 再做最后一次检查
-    - cron: '1 8 * * 1-5'
-    
+    # Day session Beijing 09:00-15:00 → UTC 01:00-07:00 (Mon-Fri)
+    - cron: '*/5 1-7 * * 1-5'
+    # Night session Beijing 21:00-23:00 → UTC 13:00-15:00 (Sun-Thu)
+    - cron: '*/5 13-15 * * 0-4'
+
 permissions:
   contents: write
 
@@ -28,57 +28,43 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install holidays
 
-      - name: Fetch latest bars (real akshare collection)
-        run: python fetch_pvc.py
-
-      - name: "Gate: trade-day + date/quality check"
-        run: |
-          python - <<'PY'
-          import datetime as dt
-          import json
-          import sys
-          from pathlib import Path
-
-          import holidays
-
-          tz = dt.timezone(dt.timedelta(hours=8))  # Asia/Shanghai
-          bj_today = dt.datetime.now(tz).date()
-          today = bj_today
-          today_str = today.isoformat()
-
-          # Skip weekends and Chinese public holidays.
-          if today.weekday() >= 5:
-              print(f"SKIP: weekend ({today_str})")
-              sys.exit(0)
-          if today in holidays.country_holidays("CN", years=today.year):
-              print(f"SKIP: Chinese public holiday ({today_str})")
-              sys.exit(0)
-
-          # Date requirement: latest daily bar must be today (Beijing).
-          daily = json.loads(Path("output/daily_bars.json").read_text(encoding="utf-8"))
-          latest = daily[-1]["trading_date"]
-          if latest != bj_today.isoformat():
-              # Data not yet ready; do not commit, retry on next scheduled run.
-              print(f"SKIP: data not ready (latest trading_date={latest}, today={bj_today})")
-              sys.exit(0)
-
-          print(f"READY: latest trading_date={latest} (today={bj_today})")
-          Path("DO_COMMIT").touch()
-          PY
-
-      - name: Commit and push data update
-        if: hashFiles('DO_COMMIT') != ''
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch latest data (minute + daily + realtime, independent)
+        run: python fetch_pvc.py
+
+      - name: Commit minute data changes
+        run: |
           git add output/minute_bars.json output/minute_bars.csv \
-                 output/daily_bars.json output/daily_bars.csv \
                  output/minute_data_quality.jsonl
-          if git diff --quiet --cached; then
-            echo "No data changes; nothing to commit."
-            exit 0
+          if git diff --quiet --cached \
+             -- output/minute_bars.json output/minute_bars.csv output/minute_data_quality.jsonl; then
+            echo "No minute data changes; nothing to commit."
+          else
+            git commit -m "chore: auto-refresh PVC minute data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            git push
           fi
-          git commit -m "chore: auto-refresh PVC futures data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-          git push
+
+      - name: Commit daily data changes
+        run: |
+          git add output/daily_bars.json output/daily_bars.csv
+          if git diff --quiet --cached -- output/daily_bars.json output/daily_bars.csv; then
+            echo "No daily data changes; nothing to commit."
+          else
+            git commit -m "chore: auto-refresh PVC daily data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            git push
+          fi
+
+      - name: Commit realtime snapshot changes
+        run: |
+          git add output/realtime_snapshots.jsonl
+          if git diff --quiet --cached -- output/realtime_snapshots.jsonl; then
+            echo "No realtime snapshot changes; nothing to commit."
+          else
+            git commit -m "chore: auto-collect PVC realtime snapshot ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            git push
+          fi

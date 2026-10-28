@@ -183,6 +183,125 @@ def append_snapshot(record):
         f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 
 
+def fetch_sina_spot(symbol="V0"):
+    """
+    从新浪财经 API 拉取 PVC 连续合约（V0）实时行情原始字段。
+
+    直接调用 Sina HTTP 接口而非 akshare.futures_zh_spot（后者存在列数
+    不匹配导致的 ValueError 缺陷）。
+
+    返回字段字典；失败时返回 None。
+    """
+    url = f"https://hq.sinajs.cn/list=nf_{symbol}"
+    headers = {
+        "Referer": "https://finance.sina.com.cn/",
+        "User-Agent": "Mozilla/5.0",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+    except Exception as exc:
+        print(f"提示：获取新浪实时行情失败：{exc}")
+        return None
+
+    match = re.search(r'"([^"]*)"', response.text)
+    if not match:
+        return None
+
+    fields = match.group(1).split(",")
+    if len(fields) < 18:
+        print(f"提示：新浪行情字段数不足（{len(fields)} < 18），跳过")
+        return None
+
+    return {
+        "name": fields[0].strip(),
+        "time": fields[1].strip(),
+        "open": fields[2].strip(),
+        "high": fields[3].strip(),
+        "low": fields[4].strip(),
+        "last_close": fields[5].strip(),
+        "bid_price": fields[6].strip(),
+        "ask_price": fields[7].strip(),
+        "current_price": fields[8].strip(),
+        "avg_price": fields[9].strip(),
+        "last_settle_price": fields[10].strip(),
+        "buy_vol": fields[11].strip(),
+        "sell_vol": fields[12].strip(),
+        "open_interest": fields[13].strip(),
+        "volume": fields[14].strip(),
+        "contract_code": fields[15].strip(),
+        "exchange": fields[16].strip(),
+        "date": fields[17].strip(),
+    }
+
+
+def collect_realtime_snapshot():
+    """
+    获取 PVC 连续合约实时快照，独立于历史 CSV。
+
+    约定：
+    - source_date / source_time 来自数据源本身（新浪 API），不把采集时间
+      冒充行情时间。
+    - collected_at 记录实际采集时间。
+    - 数据源的成交量与持仓量原样保存。
+    - 保存到 output/realtime_snapshots.jsonl。
+    - 返回保存的记录；采集失败返回 None。
+    """
+    spot = fetch_sina_spot(symbol="V0")
+    if spot is None:
+        print("提示：实时快照采集失败，未获取到行情数据")
+        return None
+
+    collected_at = datetime.now(TZ)
+    source_date = spot.get("date")
+    source_time = spot.get("time")
+
+    source_time_str = str(source_time).strip() if source_time else ""
+    source_time_valid = bool(re.fullmatch(r"\d{6}", source_time_str))
+    if not source_time_valid:
+        print(f"提示：行情时间格式异常（source_time={source_time!r}），仍记录到快照")
+
+    trading_date = infer_trading_date(source_date, source_time, collected_at)
+
+    is_night = source_time_valid and 210000 <= int(source_time_str) <= 235959
+    trading_date_method = (
+        "inferred_next_calendar_day_for_night_session"
+        if is_night else "calendar_day"
+    )
+
+    last_close_raw = number(spot.get("last_close"))
+    last_settle_raw = number(spot.get("last_settle_price"))
+    vol = number(spot.get("volume"))
+
+    record = {
+        "symbol": "V0",
+        "name": spot.get("name") or "PVC连续",
+        "source": "Sina via AKShare",
+        "source_date": source_date,
+        "source_time": source_time,
+        "collected_at": collected_at.isoformat(),
+        "trading_date": trading_date,
+        "trading_date_method": trading_date_method,
+        "trading_date_verified": False,
+        "data_type": "realtime_snapshot",
+        "open": number(spot.get("open")),
+        "high": number(spot.get("high")),
+        "low": number(spot.get("low")),
+        "current_price": number(spot.get("current_price")),
+        "bid_price": number(spot.get("bid_price")),
+        "ask_price": number(spot.get("ask_price")),
+        "last_close_raw": last_close_raw,
+        "last_close": None if last_close_raw == 0 else last_close_raw,
+        "last_settle_price_raw": last_settle_raw,
+        "last_settle_price": None if last_settle_raw == 0 else last_settle_raw,
+        "open_interest": number(spot.get("open_interest")),
+        "volume": int(vol) if vol is not None and vol == int(vol) else vol,
+        "is_daily_bar_final": False,
+    }
+    append_snapshot(record)
+    return record
+
+
 def json_to_csv(json_path, csv_path):
     """
     将 JSON 数组文件转换为 UTF-8 BOM 编码的 CSV 文件。
@@ -642,6 +761,29 @@ def update_minute_bars(symbol, df):
         raise
     return len(data), len(merged)
 
+
+def is_after_market_close():
+    """
+    判断当前北京时间是否已过 PVC 交易当日收盘。
+
+    PVC 交易时间（大商所）：
+    - 白盘：09:00-15:00
+    - 夜盘：21:00-23:00（周日至周四）
+
+    周五无夜盘，收盘后（15:00）即可获取当周最后一个日线。
+    其他交易日夜盘收盘后（23:00）即可获取完整日线。
+    周末休市时返回 False，避免无意义的 API 调用。
+    """
+    now = datetime.now(TZ)
+    weekday = now.weekday()  # 0=Mon … 5=Sat, 6=Sun
+    hhmm = int(now.strftime("%H%M"))
+
+    if weekday == 4:
+        return hhmm >= 1500
+    if 0 <= weekday <= 3:
+        return hhmm >= 2300
+    return False
+
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -662,33 +804,53 @@ if __name__ == "__main__":
                       f"JSON 保持有效，CSV 可在下次运行时重试。")
                 raise SystemExit(1)
 
-    # 1. 获取并保存指定合约分钟线
-    minute_df = ak.futures_zh_minute_sina(symbol="V2701", period="1")
-    if minute_df is None or minute_df.empty:
-        raise RuntimeError("分钟数据为空，停止更新。")
-    updated, total = update_minute_bars("V2701", minute_df)
+    # 1. 实时快照（独立运行，不影响其他数据流）
     try:
-        json_to_csv(MINUTE_BARS, MINUTE_BARS_CSV)
+        snapshot = collect_realtime_snapshot()
+        if snapshot:
+            print(f"实时快照：已保存，行情时间 {snapshot.get('source_date')} "
+                  f"{snapshot.get('source_time')}，采集时间 {snapshot.get('collected_at')}")
+        else:
+            print("实时快照：采集失败，未获取到行情数据")
     except Exception as exc:
-        print(f"错误：分钟线 CSV 生成失败: {exc}；JSON 已更新，CSV 可重建。")
-        raise SystemExit(1)
-    print(f"分钟线：本次校验 {updated} 条；文件累计 {total} 条；路径 {MINUTE_BARS}；CSV {MINUTE_BARS_CSV}")
+        print(f"实时快照采集失败（不影响其他流程）：{exc}")
 
-    # 2. 获取并更新连续合约日线
-    daily_df = ak.futures_zh_daily_sina(symbol="V0")
-    if daily_df is None or daily_df.empty:
-        raise RuntimeError("日线数据为空，停止更新。")
-
-    required = {"date", "open", "high", "low", "close", "volume", "hold", "settle"}
-    missing = required - set(daily_df.columns)
-    if missing:
-        raise ValueError(f"日线数据缺少字段：{sorted(missing)}")
-
-    validated = validate_daily_bars(daily_df)
-    count = update_daily_bars(validated)
+    # 2. 分钟线（独立运行，不依赖日线最新日期是否等于当天）
     try:
-        json_to_csv(DAILY_BARS, DAILY_BARS_CSV)
+        minute_df = ak.futures_zh_minute_sina(symbol="V2701", period="1")
+        if minute_df is None or minute_df.empty:
+            raise RuntimeError("分钟数据为空，停止更新。")
+        updated, total = update_minute_bars("V2701", minute_df)
+        try:
+            json_to_csv(MINUTE_BARS, MINUTE_BARS_CSV)
+        except Exception as exc:
+            print(f"错误：分钟线 CSV 生成失败: {exc}；JSON 已更新，CSV 可重建。")
+        print(f"分钟线：本次校验 {updated} 条；文件累计 {total} 条；"
+              f"路径 {MINUTE_BARS}；CSV {MINUTE_BARS_CSV}")
     except Exception as exc:
-        print(f"错误：日线 CSV 生成失败: {exc}；JSON 已更新，CSV 可重建。")
-        raise SystemExit(1)
-    print(f"日线：本次校验 {len(validated)} 条；更新结果 {count}；路径 {DAILY_BARS}；CSV {DAILY_BARS_CSV}")
+        print(f"分钟线更新失败（不影响其他流程）：{exc}")
+
+    # 3. 日线（独立运行，仅在收盘后采集以避免重复获取）
+    try:
+        if not is_after_market_close():
+            print("日线：未到收盘时间，跳过采集")
+        else:
+            daily_df = ak.futures_zh_daily_sina(symbol="V0")
+            if daily_df is None or daily_df.empty:
+                raise RuntimeError("日线数据为空，停止更新。")
+
+            required = {"date", "open", "high", "low", "close", "volume", "hold", "settle"}
+            missing = required - set(daily_df.columns)
+            if missing:
+                raise ValueError(f"日线数据缺少字段：{sorted(missing)}")
+
+            validated = validate_daily_bars(daily_df)
+            count = update_daily_bars(validated)
+            try:
+                json_to_csv(DAILY_BARS, DAILY_BARS_CSV)
+            except Exception as exc:
+                print(f"错误：日线 CSV 生成失败: {exc}；JSON 已更新，CSV 可重建。")
+            print(f"日线：本次校验 {len(validated)} 条；更新结果 {count}；"
+                  f"路径 {DAILY_BARS}；CSV {DAILY_BARS_CSV}")
+    except Exception as exc:
+        print(f"日线更新失败（不影响其他流程）：{exc}")
