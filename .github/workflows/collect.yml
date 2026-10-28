@@ -5,8 +5,9 @@ on:
   schedule:
     # Day session Beijing 09:00-15:00 → UTC 01:00-07:00 (Mon-Fri)
     - cron: '*/5 1-7 * * 1-5'
-    # Night session Beijing 21:00-23:00 → UTC 13:00-15:00 (Sun-Thu)
-    - cron: '*/5 13-15 * * 0-4'
+    # Night session Beijing 21:00-23:00 → UTC 13:00-15:00 (UTC Sun-Thu = Beijing Mon-Fri)
+    - cron: '*/5 13-14 * * 0-4'
+    - cron: '0 15 * * 0-4'
 
 permissions:
   contents: write

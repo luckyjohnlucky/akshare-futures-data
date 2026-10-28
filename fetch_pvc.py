@@ -75,16 +75,13 @@ def infer_trading_date(source_date, source_time, collected_at):
     初版交易日推定：
     21:00 及之后的夜盘归入下一自然日。
     注意：尚未接入大商所节假日交易日历，结果需要验证。
+    source_date/source_time 必须已由调用方严格校验；此处不以本机日期兜底。
     """
-    base_date = source_date or collected_at.date().isoformat()
+    day = datetime.strptime(source_date, "%Y-%m-%d").date()
 
+    source_time_str = str(source_time).strip()
     try:
-        day = datetime.strptime(base_date, "%Y-%m-%d").date()
-    except ValueError:
-        day = collected_at.date()
-
-    try:
-        hhmmss = int(str(source_time).strip())
+        hhmmss = int(source_time_str)
     except (TypeError, ValueError):
         hhmmss = -1
 
@@ -235,6 +232,35 @@ def fetch_sina_spot(symbol="V0"):
     }
 
 
+def _validate_source_date(value):
+    """严格校验源日期：必须为 YYYY-MM-DD 且为真实日历日期；否则返回 None。"""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return None
+    try:
+        datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return s
+
+
+def _validate_source_time(value):
+    """严格校验源时间：必须为 HHMMSS 且时分秒合法；否则返回 None。"""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not re.fullmatch(r"\d{6}", s):
+        return None
+    hh = int(s[0:2])
+    mm = int(s[2:4])
+    ss = int(s[4:6])
+    if hh > 23 or mm > 59 or ss > 59:
+        return None
+    return s
+
+
 def collect_realtime_snapshot():
     """
     获取 PVC 连续合约实时快照，独立于历史 CSV。
@@ -253,20 +279,26 @@ def collect_realtime_snapshot():
         return None
 
     collected_at = datetime.now(TZ)
-    source_date = spot.get("date")
-    source_time = spot.get("time")
+    source_date = _validate_source_date(spot.get("date"))
+    source_time = _validate_source_time(spot.get("time"))
 
-    source_time_str = str(source_time).strip() if source_time else ""
-    source_time_valid = bool(re.fullmatch(r"\d{6}", source_time_str))
-    if not source_time_valid:
-        print(f"提示：行情时间格式异常（source_time={source_time!r}），仍记录到快照")
+    if source_date is None:
+        print(f"提示：无效的源日期（source_date={spot.get('date')!r}），不写入快照")
+        return None
+    if source_time is None:
+        print(f"提示：无效的源时间（source_time={spot.get('time')!r}），不写入快照")
+        return None
 
     trading_date = infer_trading_date(source_date, source_time, collected_at)
 
-    is_night = source_time_valid and 210000 <= int(source_time_str) <= 235959
+    is_night = 210000 <= int(source_time) <= 235959
     trading_date_method = (
         "inferred_next_calendar_day_for_night_session"
         if is_night else "calendar_day"
+    )
+
+    bar_datetime = (
+        f"{source_date} {source_time[0:2]}:{source_time[2:4]}:{source_time[4:6]}"
     )
 
     last_close_raw = number(spot.get("last_close"))
@@ -276,9 +308,10 @@ def collect_realtime_snapshot():
     record = {
         "symbol": "V0",
         "name": spot.get("name") or "PVC连续",
-        "source": "Sina via AKShare",
+        "source": "Sina HTTP API",
         "source_date": source_date,
         "source_time": source_time,
+        "bar_datetime": bar_datetime,
         "collected_at": collected_at.isoformat(),
         "trading_date": trading_date,
         "trading_date_method": trading_date_method,

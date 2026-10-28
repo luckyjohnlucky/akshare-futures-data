@@ -153,9 +153,10 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
         self.assertIsNotNone(record)
         self.assertEqual(record["symbol"], "V0")
         self.assertEqual(record["name"], "PVC连续")
-        self.assertEqual(record["source"], "Sina via AKShare")
+        self.assertEqual(record["source"], "Sina HTTP API")
         self.assertEqual(record["source_date"], "2026-10-27")
         self.assertEqual(record["source_time"], "230000")
+        self.assertEqual(record["bar_datetime"], "2026-10-27 23:00:00")
         self.assertEqual(record["data_type"], "realtime_snapshot")
         self.assertEqual(record["current_price"], 5174.0)
         self.assertEqual(record["bid_price"], 5175.0)
@@ -226,18 +227,61 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
         self.assertEqual(record["trading_date_method"], "calendar_day")
 
     @patch("fetch_pvc.requests")
-    def test_invalid_time_format_still_records(self, mock_requests):
-        """Invalid source_time format → still records snapshot with warning."""
+    def test_invalid_time_format_rejected(self, mock_requests):
+        """Invalid source_time format → rejected, no snapshot written."""
         mock_requests.get.return_value = make_mock_response(
             sina_text(date_str="2026-10-28", time_str="invalid")
+        )
+
+        result = m.collect_realtime_snapshot()
+
+        self.assertIsNone(result)
+        self.assertFalse(m.SNAPSHOTS.exists())
+
+    @patch("fetch_pvc.requests")
+    def test_invalid_date_rejected(self, mock_requests):
+        """Invalid source_date (bad calendar date) → rejected, no snapshot written."""
+        mock_requests.get.return_value = make_mock_response(
+            sina_text(date_str="2026-13-01", time_str="143000")
+        )
+
+        result = m.collect_realtime_snapshot()
+
+        self.assertIsNone(result)
+        self.assertFalse(m.SNAPSHOTS.exists())
+
+    @patch("fetch_pvc.requests")
+    def test_missing_source_date_rejected(self, mock_requests):
+        """Missing/empty source_date → rejected even though collected_at exists."""
+        fields = [
+            "PVC连续",
+            "143000",
+        ] + [""] * 16  # date field empty
+        fields_str = ",".join(fields)
+        mock_requests.get.return_value = make_mock_response(
+            f'var hq_str_nf_V0="{fields_str}";'
+        )
+
+        result = m.collect_realtime_snapshot()
+
+        self.assertIsNone(result)
+        self.assertFalse(m.SNAPSHOTS.exists())
+
+    @patch("fetch_pvc.requests")
+    def test_bar_datetime_from_source_date_and_time(self, mock_requests):
+        """bar_datetime must be built from real source date + source time, never collected_at."""
+        mock_requests.get.return_value = make_mock_response(
+            sina_text(date_str="2026-10-27", time_str="230000")
         )
 
         record = m.collect_realtime_snapshot()
 
         self.assertIsNotNone(record)
-        self.assertEqual(record["source_time"], "invalid")
-        self.assertEqual(record["trading_date"], "2026-10-28")
-        self.assertEqual(record["trading_date_method"], "calendar_day")
+        self.assertEqual(record["bar_datetime"], "2026-10-27 23:00:00")
+        self.assertEqual(record["source_date"], "2026-10-27")
+        self.assertEqual(record["source_time"], "230000")
+        # collected_at is a distinct ISO timestamp, not confused with bar time
+        self.assertNotEqual(record["collected_at"], record["bar_datetime"])
 
     @patch("fetch_pvc.requests")
     def test_api_failure_returns_none(self, mock_requests):
