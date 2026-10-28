@@ -3,10 +3,11 @@ name: Collect PVC futures data
 on:
   workflow_dispatch:
   schedule:
-    # Weekdays 15:01-15:31 Beijing time (UTC-8=UTC+8: 07:01-07:31),
-    # retry every 5 minutes until data meets date+quality requirements.
-    - cron: '1,6,11,16,21,26,31 7 * * 1-5'
-
+    # 北京时间工作日 15:01-15:56，每 5 分钟重试
+    - cron: '1,6,11,16,21,26,31,36,41,46,51,56 7 * * 1-5'
+    # 北京时间 16:01 再做最后一次检查
+    - cron: '1 8 * * 1-5'
+    
 permissions:
   contents: write
 
@@ -32,7 +33,7 @@ jobs:
       - name: Fetch latest bars (real akshare collection)
         run: python fetch_pvc.py
 
-      - name: Gate: trade-day + date/quality check
+      - name: "Gate: trade-day + date/quality check"
         run: |
           python - <<'PY'
           import datetime as dt
@@ -43,7 +44,8 @@ jobs:
           import holidays
 
           tz = dt.timezone(dt.timedelta(hours=8))  # Asia/Shanghai
-          today = dt.date.today()
+          bj_today = dt.datetime.now(tz).date()
+          today = bj_today
           today_str = today.isoformat()
 
           # Skip weekends and Chinese public holidays.
@@ -57,8 +59,7 @@ jobs:
           # Date requirement: latest daily bar must be today (Beijing).
           daily = json.loads(Path("output/daily_bars.json").read_text(encoding="utf-8"))
           latest = daily[-1]["trading_date"]
-          bj_today = dt.datetime.now(tz).date().isoformat()
-          if latest != bj_today:
+          if latest != bj_today.isoformat():
               # Data not yet ready; do not commit, retry on next scheduled run.
               print(f"SKIP: data not ready (latest trading_date={latest}, today={bj_today})")
               sys.exit(0)
