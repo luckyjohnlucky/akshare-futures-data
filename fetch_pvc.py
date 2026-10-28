@@ -4,6 +4,7 @@
 import csv
 import json
 import re
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -861,7 +862,8 @@ if __name__ == "__main__":
         print(f"分钟线：本次校验 {updated} 条；文件累计 {total} 条；"
               f"路径 {MINUTE_BARS}；CSV {MINUTE_BARS_CSV}")
     except Exception as exc:
-        print(f"分钟线更新失败（不影响其他流程）：{exc}")
+        print(f"分钟线更新失败：{exc}")
+        raise SystemExit(1)
 
     # 3. 日线（独立运行，仅在收盘后采集以避免重复获取）
     try:
