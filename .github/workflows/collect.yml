@@ -36,51 +36,16 @@ jobs:
       - name: Fetch latest data (minute + daily + realtime, independent)
         run: python fetch_pvc.py
 
-      - name: Commit minute data changes
+      - name: Commit all data changes
         run: |
           git add output/minute_bars.json output/minute_bars.csv \
-                 output/minute_data_quality.jsonl
-          if git diff --quiet --cached \
-             -- output/minute_bars.json output/minute_bars.csv output/minute_data_quality.jsonl; then
-            echo "No minute data changes; nothing to commit."
+                 output/minute_data_quality.jsonl \
+                 output/daily_bars.json output/daily_bars.csv \
+                 output/realtime_snapshots.jsonl
+          if git diff --quiet --cached; then
+            echo "No data changes; nothing to commit."
           else
-            git commit -m "chore: auto-refresh PVC minute data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            for i in 1 2 3; do
-              git fetch origin
-              git rebase origin/main
-              if git push; then
-                break
-              fi
-              echo "Push failed, retrying ($i/3)..."
-              sleep 5
-            done
-          fi
-
-      - name: Commit daily data changes
-        run: |
-          git add output/daily_bars.json output/daily_bars.csv
-          if git diff --quiet --cached -- output/daily_bars.json output/daily_bars.csv; then
-            echo "No daily data changes; nothing to commit."
-          else
-            git commit -m "chore: auto-refresh PVC daily data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            for i in 1 2 3; do
-              git fetch origin
-              git rebase origin/main
-              if git push; then
-                break
-              fi
-              echo "Push failed, retrying ($i/3)..."
-              sleep 5
-            done
-          fi
-
-      - name: Commit realtime snapshot changes
-        run: |
-          git add output/realtime_snapshots.jsonl
-          if git diff --quiet --cached -- output/realtime_snapshots.jsonl; then
-            echo "No realtime snapshot changes; nothing to commit."
-          else
-            git commit -m "chore: auto-collect PVC realtime snapshot ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            git commit -m "chore: auto-collect PVC data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
             for i in 1 2 3; do
               git fetch origin
               git rebase origin/main
