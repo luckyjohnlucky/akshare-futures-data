@@ -45,9 +45,15 @@ jobs:
             echo "No minute data changes; nothing to commit."
           else
             git commit -m "chore: auto-refresh PVC minute data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            git fetch origin
-            git rebase origin/main
-            git push
+            for i in 1 2 3; do
+              git fetch origin
+              git rebase origin/main
+              if git push; then
+                break
+              fi
+              echo "Push failed, retrying ($i/3)..."
+              sleep 5
+            done
           fi
 
       - name: Commit daily data changes
@@ -57,9 +63,15 @@ jobs:
             echo "No daily data changes; nothing to commit."
           else
             git commit -m "chore: auto-refresh PVC daily data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            git fetch origin
-            git rebase origin/main
-            git push
+            for i in 1 2 3; do
+              git fetch origin
+              git rebase origin/main
+              if git push; then
+                break
+              fi
+              echo "Push failed, retrying ($i/3)..."
+              sleep 5
+            done
           fi
 
       - name: Commit realtime snapshot changes
@@ -69,7 +81,13 @@ jobs:
             echo "No realtime snapshot changes; nothing to commit."
           else
             git commit -m "chore: auto-collect PVC realtime snapshot ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            git fetch origin
-            git rebase origin/main
-            git push
+            for i in 1 2 3; do
+              git fetch origin
+              git rebase origin/main
+              if git push; then
+                break
+              fi
+              echo "Push failed, retrying ($i/3)..."
+              sleep 5
+            done
           fi
