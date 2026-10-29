@@ -81,17 +81,20 @@ def clean(value: Any) -> Any:
     return str(value)
 
 
-def number(value: Any) -> Optional[float]:
+def number(value: Any) -> Optional[float | int]:
     value = clean(value)
     if value is None:
         return None
     try:
-        return float(value)
+        f = float(value)
+        if f == int(f):
+            return int(f)
+        return f
     except (TypeError, ValueError):
         return None
 
 
-def infer_trading_date(source_date: str, source_time: str, collected_at: datetime) -> str:
+def infer_trading_date(source_date: str, source_time: str) -> str:
     """
     初版交易日推定：
     21:00 及之后的夜盘归入下一自然日。
@@ -311,7 +314,7 @@ def collect_realtime_snapshot(symbol: str = "V0") -> Optional[dict]:
         logger.error("无效的源时间（source_time=%r），%s 不写入快照", spot.get("time"), symbol)
         return None
 
-    trading_date = infer_trading_date(source_date, source_time, collected_at)
+    trading_date = infer_trading_date(source_date, source_time)
 
     is_night = 210000 <= int(source_time) <= 235959
     trading_date_method = (
@@ -748,7 +751,7 @@ def filter_future_anomalies(
     for item in records:
         bar_dt = parse_market_datetime(item.get("datetime"))
         coll_dt = parse_market_datetime(item.get("collected_at"))
-        if bar_dt is None or coll_dt is None:
+        if pd.isna(bar_dt) or pd.isna(coll_dt):
             kept.append(item)
             continue
         if bar_dt > coll_dt + FUTURE_TIMESTAMP_TOLERANCE:
@@ -779,8 +782,13 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
     old_records = []
 
     if MINUTE_BARS.exists():
-        with MINUTE_BARS.open("r", encoding="utf-8") as f:
-            old_records = json.load(f)
+        try:
+            with MINUTE_BARS.open("r", encoding="utf-8") as f:
+                old_records = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            raise RuntimeError(
+                f"现有分钟 JSON 无法安全读取，已停止写入以防覆盖：{exc}"
+            ) from exc
         if not isinstance(old_records, list):
             raise ValueError("分钟历史文件格式错误：预期为 JSON 数组")
 

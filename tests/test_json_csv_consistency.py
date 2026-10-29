@@ -200,8 +200,8 @@ class JsonMatchesCsvTests(unittest.TestCase):
         csv_path.write_text("", encoding="utf-8")
         self.assertTrue(m.json_matches_csv(json_path, csv_path))
 
-    def test_empty_json_with_no_header_csv_returns_false(self):
-        """Empty JSON with CSV having no header -> should not auto-pass.
+    def test_empty_json_matches_empty_csv(self):
+        """Empty JSON with empty CSV (no header, no data) -> consistent.
 
         Per spec: empty JSON only matches if CSV structure conforms to
         the empty case (no header, no data). This is consistent.
@@ -457,7 +457,6 @@ class UpdateDailyBarsCleanupTests(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self._orig = {
             "DAILY_BARS": m.DAILY_BARS,
-            "DAILY_BARS_CSV": m.DAILY_BARS_CSV,
             "DAILY_BARS_CSV": m.DAILY_BARS_CSV,
             "OUT": m.OUT,
             "ROOT": m.ROOT,
