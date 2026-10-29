@@ -64,6 +64,11 @@ DAILY_BARS = OUT / "daily_bars.json"
 DAILY_BARS_CSV = OUT / "daily_bars.csv"
 TZ = ZoneInfo("Asia/Shanghai")
 
+SYMBOL_NAME_MAP = {
+    "V0": "PVC连续",
+    "V2701": "PVC 2701",
+}
+
 
 def clean(value: Any) -> Any:
     """将 Pandas/Numpy 值转换成可序列化的普通 Python 值。"""
@@ -324,7 +329,7 @@ def collect_realtime_snapshot(symbol: str = "V0") -> Optional[dict]:
 
     record = {
         "symbol": symbol,
-        "name": spot.get("name") or "PVC连续",
+        "name": spot.get("name") or SYMBOL_NAME_MAP.get(symbol, "PVC连续"),
         "source": "Sina HTTP API",
         "source_date": source_date,
         "source_time": source_time,
@@ -528,7 +533,7 @@ def update_daily_bars(df: pd.DataFrame, symbol: str = "V0") -> int:
         trading_date = pd.to_datetime(row["date"]).date().isoformat()
         record = {
             "symbol": symbol,
-            "name": "PVC连续",
+            "name": SYMBOL_NAME_MAP.get(symbol, "PVC连续"),
             "trading_date": trading_date,
             "open": number(row.get("open")),
             "high": number(row.get("high")),
@@ -976,15 +981,12 @@ if __name__ == "__main__":
 
     # 3. 日线（独立运行，白盘收盘后采集白盘日线，完全收盘后采集完整日线）
     #    互斥：当完全收盘条件满足时，只采集完整日线；否则采集白盘日线。
-    _daily_updated: dict[str, bool] = {}
     for sym in ("V0", "V2701"):
         try:
             if is_after_market_close():
                 fetch_and_update_daily_bars(sym, "完整")
-                _daily_updated[sym] = True
             elif is_after_day_session_close():
                 fetch_and_update_daily_bars(sym, "白盘")
-                _daily_updated[sym] = True
             else:
                 logger.info("日线 %s：未到采集时间，跳过", sym)
 
