@@ -38,10 +38,10 @@ jobs:
 
       - name: Commit all data changes
         run: |
-          git add output/minute_bars.json output/minute_bars.csv \
-                 output/minute_data_quality.jsonl \
-                 output/daily_bars.json output/daily_bars.csv \
-                 output/realtime_snapshots.jsonl
+          git add output/V0_minute_bars.csv output/V2701_minute_bars.csv \
+                 output/V0_daily_bars.csv output/V2701_daily_bars.csv \
+                 output/V0_realtime_snapshots.jsonl output/V2701_realtime_snapshots.jsonl \
+                 output/minute_data_quality.jsonl
           if git diff --quiet --cached; then
             echo "No data changes; nothing to commit."
           else

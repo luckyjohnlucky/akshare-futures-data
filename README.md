@@ -1,7 +1,7 @@
 # akshare-futures-data
 
 采集 PVC 连续合约（`V0`/`V2701`）的历史日线与分钟行情，执行质量校验、去重与合并，
-并输出结构化 JSON 与 CSV。
+并输出结构化 CSV 与实时快照 JSONL。
 
 ## 环境
 
@@ -22,22 +22,27 @@ python fetch_pvc.py
 
 依次执行：
 
-1. 抓取 `V2701` 分钟行情 → `validate_minute_bars` 校验 →
+1. **实时快照**：抓取 `V2701`/`V0` 新浪 HTTP API 实时行情 → 严格校验源日期/源时间 →
+   写入 `output/V0_realtime_snapshots.jsonl` / `output/V2701_realtime_snapshots.jsonl`。
+2. **分钟线**：抓取 `V2701`/`V0` AKShare 1 分钟行情 → `validate_minute_bars` 校验 →
    `separate_future_timestamps` 过滤采集后未到时间的 bar（以 `Asia/Shanghai`
    时区 `collected_at` 为基准，容差 1 分钟）
-   → `update_minute_bars` 合并历史并原子写入 `output/minute_bars.json`
-   → `json_to_csv` 输出 `output/minute_bars.csv`。
-2. 抓取 `V0` 日线 → `validate_daily_bars` → `update_daily_bars`
-   → `output/daily_bars.json` + `output/daily_bars.csv`。
+   → `update_minute_bars` 合并历史并原子写入 `output/V0_minute_bars.csv` /
+   `output/V2701_minute_bars.csv`。
+3. **日线**：抓取 `V0`/`V2701` AKShare 日线 → `validate_daily_bars` → `update_daily_bars`
+   → `output/V0_daily_bars.csv` / `output/V2701_daily_bars.csv`。
 
 ## 数据目录 (`output/`)
 
 | 文件 | 说明 |
 |------|------|
-| `minute_bars.json` / `minute_bars.csv` | 分钟 Bar，按 `(symbol, datetime)` 去重合并，按时间升序。 |
-| `daily_bars.json` / `daily_bars.csv` | 日线，按 `(symbol, trading_date)` 去重合并，按日期升序。 |
-| `minute_data_quality.jsonl` | 因异常（如 `future_timestamp`）被排除的分钟记录明细。 |
-| `realtime_snapshots.jsonl` | 实时快照流（个人采集，未入库）。 |
+| `output/V0_minute_bars.csv` | V0 分钟 Bar，按 `(symbol, datetime)` 去重合并，按时间升序。 |
+| `output/V2701_minute_bars.csv` | V2701 分钟 Bar，按 `(symbol, datetime)` 去重合并，按时间升序。 |
+| `output/V0_daily_bars.csv` | V0 日线，按 `(symbol, trading_date)` 去重合并，按日期升序。 |
+| `output/V2701_daily_bars.csv` | V2701 日线，按 `(symbol, trading_date)` 去重合并，按日期升序。 |
+| `output/V0_realtime_snapshots.jsonl` | V0 实时快照流（JSONL，追加写入）。 |
+| `output/V2701_realtime_snapshots.jsonl` | V2701 实时快照流（JSONL，追加写入）。 |
+| `output/minute_data_quality.jsonl` | 因异常（如 `future_timestamp`）被排除的分钟记录明细（全局）。 |
 
 ## 质量过滤规则
 
@@ -58,4 +63,6 @@ python -m unittest discover -s tests -v
 ## 安全约定
 
 - 写盘采用“临时文件 + 原子替换” (`rename`)，避免半成品；
-- 接口返回空/`None` 或校验失败时，抛出异常并**不改动**已有行情文件。
+- 接口返回空/`None` 或校验失败时，抛出异常并**不改动**已有行情文件；
+- 工作流 `git push` 前执行 `git fetch + rebase`，失败时最多重试 3 次，
+  避免并发提交导致推送被拒绝。

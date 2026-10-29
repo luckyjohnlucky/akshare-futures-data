@@ -2,7 +2,7 @@
 """接口异常失败保护测试。
 
 验证：当分钟行情接口抛出异常 / 返回 None / 返回空 / 校验失败时，
-output/minute_bars.json、output/minute_bars.csv 以及
+output/V2701_minute_bars.csv 以及
 output/minute_data_quality.jsonl 不能被清空、截断或意外覆盖。
 
 这些测试使用**临时目录**模拟正式输出路径，所有快照比对在隔离环境下进行，
@@ -57,8 +57,8 @@ def _lines(p):
 def snapshot():
     """返回 (sha, size, count) 三元组，便于前后比对。"""
     snap = {}
-    for key, path in (("json", m.MINUTE_BARS),
-                      ("csv", m.MINUTE_BARS_CSV),
+    minute_csv = m.get_minute_csv("V2701")
+    for key, path in (("csv", minute_csv),
                       ("quality", m.QUALITY_LOG)):
         if Path(path).exists():
             data = Path(path).read_bytes()
@@ -70,19 +70,18 @@ def snapshot():
 
 
 def _count_for(key, path):
-    return {"json": _json_count, "csv": _csv_count, "quality": _lines}[key](path)
+    return {"csv": _csv_count, "quality": _lines}[key](path)
 
 
 def run_main_minute_block():
     """
     忠实复现 fetch_pvc.py __main__ 的分钟抓取—更新—导出流程。
-    接口调用、None/空判断、update_minute_bars、json_to_csv 均为实物函数。
+    接口调用、None/空判断、update_minute_bars 均为实物函数。
     """
     minute_df = m.ak.futures_zh_minute_sina(symbol="V2701", period="1")
     if minute_df is None or minute_df.empty:
         raise RuntimeError("分钟数据为空，停止更新。")
     updated, total = m.update_minute_bars("V2701", minute_df)
-    m.json_to_csv(m.MINUTE_BARS, m.MINUTE_BARS_CSV)
     return updated, total
 
 
@@ -94,23 +93,19 @@ class InterfaceFailureSafetyTests(unittest.TestCase):
 
         # Save original paths
         self._orig = {
-            "MINUTE_BARS": m.MINUTE_BARS,
-            "MINUTE_BARS_CSV": m.MINUTE_BARS_CSV,
+            "MINUTE_BARS_CSV_V2701": m.get_minute_csv("V2701"),
             "QUALITY_LOG": m.QUALITY_LOG,
             "OUT": m.OUT,
         }
 
         # Redirect to temp
         m.OUT = self.dir
-        m.MINUTE_BARS = self.dir / "minute_bars.json"
-        m.MINUTE_BARS_CSV = self.dir / "minute_bars.csv"
         m.QUALITY_LOG = self.dir / "minute_data_quality.jsonl"
 
         # Create minimal files so snapshot() works
-        if not m.MINUTE_BARS.exists():
-            m.MINUTE_BARS.write_text("[]", encoding="utf-8")
-        if not m.MINUTE_BARS_CSV.exists():
-            m.MINUTE_BARS_CSV.write_text("", encoding="utf-8")
+        minute_csv = m.get_minute_csv("V2701")
+        if not minute_csv.exists():
+            minute_csv.write_text("", encoding="utf-8")
         if not m.QUALITY_LOG.exists():
             m.QUALITY_LOG.write_text("", encoding="utf-8")
 
@@ -150,7 +145,7 @@ class InterfaceFailureSafetyTests(unittest.TestCase):
                 run_main_minute_block()
 
     def test_validation_failure_protects_files(self):
-        """update_minute_bars 内部校验失败 → 抛出，MINUTE_BARS 未读写。"""
+        """update_minute_bars 内部校验失败 → 抛出，CSV 文件未读写。"""
         bad_df = pd.DataFrame({"foo": [1, 2]})  # 缺少全部必字段
         with self.assertRaises(ValueError):
             m.update_minute_bars("V2701", bad_df)

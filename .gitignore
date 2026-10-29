@@ -19,7 +19,7 @@ backup_*/
 fetch_pvc.py.backup_*
 
 # Real-time snapshots are tracked for traceability and freshness validation.
-# output/realtime_snapshots.jsonl  -- previously ignored; now tracked.
+# output/V0_realtime_snapshots.jsonl / output/V2701_realtime_snapshots.jsonl
 
 # Stale root-level duplicates (canonical data lives under output/)
 /daily_bars.csv

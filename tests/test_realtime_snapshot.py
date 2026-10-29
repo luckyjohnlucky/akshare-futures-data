@@ -133,14 +133,14 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
         self.dir.mkdir(parents=True, exist_ok=True)
         self._orig = {
             "OUT": m.OUT,
-            "SNAPSHOTS": m.SNAPSHOTS,
+            "SNAPSHOTS_V0": m.get_snapshot_file("V0"),
         }
         m.OUT = self.dir
-        m.SNAPSHOTS = self.dir / "realtime_snapshots.jsonl"
 
     def tearDown(self):
         for attr, val in self._orig.items():
-            setattr(m, attr, val)
+            if attr == "OUT":
+                setattr(m, attr, val)
         self.tmp.cleanup()
 
     @patch("fetch_pvc.requests")
@@ -192,8 +192,8 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
 
         m.collect_realtime_snapshot()
 
-        self.assertTrue(m.SNAPSHOTS.exists())
-        with open(m.SNAPSHOTS, encoding="utf-8") as f:
+        self.assertTrue(m.get_snapshot_file("V0").exists())
+        with open(m.get_snapshot_file("V0"), encoding="utf-8") as f:
             lines = [json.loads(l) for l in f if l.strip()]
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0]["symbol"], "V0")
@@ -236,7 +236,7 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
         result = m.collect_realtime_snapshot()
 
         self.assertIsNone(result)
-        self.assertFalse(m.SNAPSHOTS.exists())
+        self.assertFalse(m.get_snapshot_file("V0").exists())
 
     @patch("fetch_pvc.requests")
     def test_invalid_date_rejected(self, mock_requests):
@@ -248,7 +248,7 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
         result = m.collect_realtime_snapshot()
 
         self.assertIsNone(result)
-        self.assertFalse(m.SNAPSHOTS.exists())
+        self.assertFalse(m.get_snapshot_file("V0").exists())
 
     @patch("fetch_pvc.requests")
     def test_missing_source_date_rejected(self, mock_requests):
@@ -265,7 +265,7 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
         result = m.collect_realtime_snapshot()
 
         self.assertIsNone(result)
-        self.assertFalse(m.SNAPSHOTS.exists())
+        self.assertFalse(m.get_snapshot_file("V0").exists())
 
     @patch("fetch_pvc.requests")
     def test_bar_datetime_from_source_date_and_time(self, mock_requests):
@@ -291,7 +291,7 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
         result = m.collect_realtime_snapshot()
 
         self.assertIsNone(result)
-        self.assertFalse(m.SNAPSHOTS.exists())
+        self.assertFalse(m.get_snapshot_file("V0").exists())
 
     @patch("fetch_pvc.requests")
     def test_empty_response_returns_none(self, mock_requests):
@@ -301,7 +301,7 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
         result = m.collect_realtime_snapshot()
 
         self.assertIsNone(result)
-        self.assertFalse(m.SNAPSHOTS.exists())
+        self.assertFalse(m.get_snapshot_file("V0").exists())
 
     @patch("fetch_pvc.requests")
     def test_volume_preserved_from_source(self, mock_requests):
@@ -317,15 +317,19 @@ class CollectRealtimeSnapshotTests(unittest.TestCase):
 
     @patch("fetch_pvc.requests")
     def test_multiple_snapshots_appended(self, mock_requests):
-        """Multiple collect calls append multiple lines to the file."""
+        """Multiple collect calls with different source times append multiple lines."""
         mock_requests.get.return_value = make_mock_response(
             sina_text(date_str="2026-10-28", time_str="143000")
         )
-
-        m.collect_realtime_snapshot()
         m.collect_realtime_snapshot()
 
-        with open(m.SNAPSHOTS, encoding="utf-8") as f:
+        # Second call with different source time should append
+        mock_requests.get.return_value = make_mock_response(
+            sina_text(date_str="2026-10-28", time_str="143100")
+        )
+        m.collect_realtime_snapshot()
+
+        with open(m.get_snapshot_file("V0"), encoding="utf-8") as f:
             lines = [json.loads(l) for l in f if l.strip()]
         self.assertEqual(len(lines), 2)
 

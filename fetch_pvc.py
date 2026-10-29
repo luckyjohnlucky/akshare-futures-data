@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """采集 PVC 连续合约实时快照与历史日线。"""
+from __future__ import annotations
 
 import csv
 import json
@@ -57,17 +58,32 @@ def _retryable_call(
     raise last_exc
 
 
-ROOT = Path(__file__).resolve().parent
-OUT = ROOT / "output"
-SNAPSHOTS = OUT / "realtime_snapshots.jsonl"
-DAILY_BARS = OUT / "daily_bars.json"
-DAILY_BARS_CSV = OUT / "daily_bars.csv"
+OUT = Path(__file__).resolve().parent / "output"
 TZ = ZoneInfo("Asia/Shanghai")
 
 SYMBOL_NAME_MAP = {
     "V0": "PVC连续",
     "V2701": "PVC 2701",
 }
+
+
+def get_daily_csv(symbol: str) -> Path:
+    """返回指定品种的日线 CSV 路径。"""
+    return OUT / f"{symbol}_daily_bars.csv"
+
+
+def get_minute_csv(symbol: str) -> Path:
+    """返回指定品种的分钟线 CSV 路径。"""
+    return OUT / f"{symbol}_minute_bars.csv"
+
+
+def get_snapshot_file(symbol: str) -> Path:
+    """返回指定品种的实时快照 JSONL 路径。"""
+    return OUT / f"{symbol}_realtime_snapshots.jsonl"
+
+
+QUALITY_LOG = OUT / "minute_data_quality.jsonl"
+FUTURE_TIMESTAMP_TOLERANCE = timedelta(minutes=1)
 
 
 def clean(value: Any) -> Any:
@@ -87,11 +103,11 @@ def number(value: Any) -> Optional[float | int]:
         return None
     try:
         f = float(value)
-        if f == int(f):
-            return int(f)
-        return f
     except (TypeError, ValueError):
         return None
+    if not np.isfinite(f):
+        return None
+    return int(f) if f == int(f) else f
 
 
 def infer_trading_date(source_date: str, source_time: str) -> str:
@@ -197,9 +213,46 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
     data["date"] = normalized_dates
     return data
 
-def append_snapshot(record: dict) -> None:
-    with SNAPSHOTS.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+def append_jsonl(records: list[dict], log_path: Path | None = None, key_fields: tuple[str, ...] = ("symbol", "datetime")) -> int:
+    """将记录去重追加写入 JSONL 文件。
+
+    参数:
+        records: 要写入的记录列表
+        log_path: 目标 JSONL 文件路径，默认使用 QUALITY_LOG
+        key_fields: 去重依据的字段名元组，默认 ("symbol", "datetime")
+
+    返回:
+        本次实际写入的条数。
+    """
+    if not records:
+        return 0
+
+    log_path = Path(log_path) if log_path else QUALITY_LOG
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = set()
+    if log_path.exists():
+        with log_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                    existing.add(tuple(item.get(k) for k in key_fields))
+                except json.JSONDecodeError:
+                    continue
+
+    written = 0
+    with log_path.open("a", encoding="utf-8") as f:
+        for item in records:
+            key = tuple(item.get(k) for k in key_fields)
+            if key in existing:
+                continue
+            existing.add(key)
+            f.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
+            written += 1
+    return written
 
 
 def fetch_sina_spot(symbol: str = "V0") -> Optional[dict]:
@@ -295,7 +348,7 @@ def collect_realtime_snapshot(symbol: str = "V0") -> Optional[dict]:
       冒充行情时间。
     - collected_at 记录实际采集时间。
     - 数据源的成交量与持仓量原样保存。
-    - 保存到 output/realtime_snapshots.jsonl。
+    - 保存到 output/{symbol}_realtime_snapshots.jsonl。
     - 返回保存的记录；采集失败返回 None。
     """
     spot = fetch_sina_spot(symbol=symbol)
@@ -353,49 +406,52 @@ def collect_realtime_snapshot(symbol: str = "V0") -> Optional[dict]:
         "last_settle_price_raw": last_settle_raw,
         "last_settle_price": None if last_settle_raw == 0 else last_settle_raw,
         "open_interest": number(spot.get("open_interest")),
-        "volume": int(vol) if vol is not None and vol == int(vol) else vol,
+        "volume": vol,
         "is_daily_bar_final": False,
     }
-    append_snapshot(record)
+    append_jsonl([record], get_snapshot_file(symbol), key_fields=("symbol", "source_date", "source_time"))
     return record
 
 
-def json_to_csv(json_path: Path, csv_path: Path) -> int:
+def records_to_csv(records: list[dict], csv_path: Path) -> int:
     """
-    将 JSON 数组文件转换为 UTF-8 BOM 编码的 CSV 文件。
+    将记录列表直接写入 UTF-8 BOM 编码的 CSV 文件。
     列名为所有记录字段的并集，保留原字段名称及首次出现的顺序。
     写入临时文件，成功后原子替换，避免留下半成品。
     """
-    try:
-        raw = json.loads(json_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"JSON 文件不存在，无法生成 CSV：{json_path}"
-        )
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"JSON 文件内容无法解析，无法生成 CSV：{json_path}：{exc}"
-        ) from exc
-
-    if not isinstance(raw, list):
-        raise ValueError(f"JSON 文件不是数组，无法生成 CSV：{json_path}")
+    if not records:
+        # 无记录时写入仅含 header 的 CSV，清空旧数据（防止异常记录残留）
+        if not csv_path.exists():
+            return 0
+        fieldnames = []
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames:
+                fieldnames = list(reader.fieldnames)
+        temp_path = csv_path.with_name(csv_path.name + ".tmp")
+        try:
+            with temp_path.open("w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(
+                    f, fieldnames=fieldnames, extrasaction="ignore"
+                )
+                writer.writeheader()
+            temp_path.replace(csv_path)
+        except Exception:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+            raise
+        return 0
 
     fieldnames = []
     seen = set()
-    rows = []
-    for index, item in enumerate(raw):
-        if not isinstance(item, dict):
-            raise ValueError(
-                f"JSON 数组中的第 {index} 条记录不是对象，无法生成 CSV：{json_path}"
-            )
-        rows.append(item)
+    for item in records:
         for key in item.keys():
             if key not in seen:
                 seen.add(key)
                 fieldnames.append(key)
-
-    if not rows:
-        raise ValueError(f"JSON 数组为空，无法生成 CSV：{json_path}")
 
     temp_path = csv_path.with_name(csv_path.name + ".tmp")
     try:
@@ -404,7 +460,7 @@ def json_to_csv(json_path: Path, csv_path: Path) -> int:
                 f, fieldnames=fieldnames, extrasaction="ignore"
             )
             writer.writeheader()
-            for item in rows:
+            for item in records:
                 cleaned = {
                     k: (v.strip() if isinstance(v, str) else v)
                     for k, v in item.items()
@@ -418,122 +474,38 @@ def json_to_csv(json_path: Path, csv_path: Path) -> int:
         except OSError:
             pass
         raise
-    return len(rows)
+    return len(records)
 
 
-def json_matches_csv(json_path: Path, csv_path: Path) -> bool:
-    """
-    Check whether the CSV file is a faithful derivation of the JSON file.
-
-    Compares:
-    - record count
-    - field collection (union of JSON keys) MUST equal CSV header field set
-    - no duplicate field names in CSV header
-    - per-record values (in order), with JSON None mapped to CSV empty string
-    - every CSV record must have exactly the same field set (no extra/missing)
-
-    This is NOT a cross-file atomic transaction; it is a consistency checkpoint.
-    """
-    try:
-        raw = json.loads(json_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return False
-
-    if not isinstance(raw, list):
-        return False
-
-    # Check every JSON item is a dict before proceeding
-    json_fields = set()
-    for item in raw:
-        if not isinstance(item, dict):
-            return False
-        json_fields.update(item.keys())
-
-    try:
-        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f)
-            csv_fieldnames = reader.fieldnames
-            csv_records = list(reader)
-    except (FileNotFoundError, OSError):
-        return False
-
-    # If JSON is empty but CSV has data, they don't match
-    if not raw and csv_records:
-        return False
-
-    # Empty JSON and empty CSV (no header, no data) -> consistent
-    if not raw and not csv_records and csv_fieldnames is None:
-        return True
-
-    # Empty JSON with proper CSV header (no data rows) -> consistent
-    if not raw and not csv_records and csv_fieldnames is not None:
-        return True
-
-    # CSV header must exist
-    if csv_fieldnames is None:
-        return False
-
-    # Check for duplicate field names in CSV header
-    if len(csv_fieldnames) != len(set(csv_fieldnames)):
-        return False
-
-    # CSV header field set must exactly match JSON field set
-    csv_field_set = set(csv_fieldnames)
-    if json_fields != csv_field_set:
-        return False
-
-    # Record count must match
-    if len(raw) != len(csv_records):
-        return False
-
-    # Compare every record value (in order), with strict field set per row
-    for json_item, csv_row in zip(raw, csv_records):
-        # csv.DictReader puts extra columns under None key (restkey) or
-        # missing columns get None. Check row field count matches header.
-        # None key in csv_row means extra columns were found
-        if None in csv_row:
-            return False
-
-        # Check for None values (missing fields in CSV row)
-        for key in json_fields:
-            if csv_row.get(key) is None:
-                return False
-
-        for key in json_fields:
-            json_val = json_item.get(key)
-            csv_val = csv_row.get(key, "")
-            # Map JSON None to CSV empty string for comparison
-            if json_val is None:
-                json_str = ""
-            else:
-                json_str = str(json_val)
-            csv_str = str(csv_val) if csv_val is not None else ""
-            if json_str != csv_str:
-                return False
-
-    return True
-
+def csv_to_records(csv_path: Path) -> list[dict]:
+    """从 CSV 文件读取记录列表。文件不存在时返回空列表。"""
+    if not csv_path.exists():
+        return []
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        return [row for row in reader]
 
 def update_daily_bars(df: pd.DataFrame, symbol: str = "V0") -> int:
     """
     历史日线以 (symbol, trading_date) 为唯一键。
-    每次读取历史接口后进行合并、去重并整体写回。
+    每次读取历史接口后进行合并、去重并整体写回 CSV。
     """
     records_by_key = {}
 
-    if DAILY_BARS.exists():
-        try:
-            old_records = json.loads(DAILY_BARS.read_text(encoding="utf-8"))
-            for item in old_records:
-                key = (item["symbol"], item["trading_date"])
-                records_by_key[key] = item
-        except (json.JSONDecodeError, OSError, KeyError, TypeError) as exc:
-            raise RuntimeError(
-                f"现有历史 JSON 无法安全读取，已停止写入以防覆盖：{exc}"
-            ) from exc
+    daily_csv = get_daily_csv(symbol)
+    if daily_csv.exists():
+        old_records = csv_to_records(daily_csv)
+        for item in old_records:
+            if not isinstance(item, dict) or not item.get("symbol") or not item.get("trading_date"):
+                raise ValueError("日线历史文件存在缺少 symbol/trading_date 的记录")
+            key = (item["symbol"], item["trading_date"])
+            records_by_key[key] = item
+
+    collected_at_str = datetime.now(TZ).isoformat()
 
     for _, row in df.iterrows():
         trading_date = pd.to_datetime(row["date"]).date().isoformat()
+        settle_raw = number(row.get("settle"))
         record = {
             "symbol": symbol,
             "name": SYMBOL_NAME_MAP.get(symbol, "PVC连续"),
@@ -544,14 +516,11 @@ def update_daily_bars(df: pd.DataFrame, symbol: str = "V0") -> int:
             "close": number(row.get("close")),
             "volume": clean(row.get("volume")),
             "open_interest": clean(row.get("hold")),
-            "settle_raw": number(row.get("settle")),
-            "settle": (
-                None if number(row.get("settle")) == 0
-                else number(row.get("settle"))
-            ),
+            "settle_raw": settle_raw,
+            "settle": None if settle_raw == 0 else settle_raw,
             "quality_status": clean(row.get("quality_status")) or "valid",
             "source": "AKShare futures_zh_daily_sina",
-            "collected_at": datetime.now(TZ).isoformat(),
+            "collected_at": collected_at_str,
         }
         records_by_key[(symbol, trading_date)] = record
 
@@ -559,28 +528,8 @@ def update_daily_bars(df: pd.DataFrame, symbol: str = "V0") -> int:
         records_by_key.values(),
         key=lambda item: (item["symbol"], item["trading_date"]),
     )
-
-    temp_path = DAILY_BARS.with_suffix(".json.tmp")
-    try:
-        temp_path.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
-        temp_path.replace(DAILY_BARS)
-    except Exception:
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
-        raise
-    return len(result)
-
-
-MINUTE_BARS = OUT / "minute_bars.json"
-MINUTE_BARS_CSV = OUT / "minute_bars.csv"
-QUALITY_LOG = OUT / "minute_data_quality.jsonl"
-FUTURE_TIMESTAMP_TOLERANCE = timedelta(minutes=1)
+    count = records_to_csv(result, daily_csv)
+    return count
 
 
 def validate_minute_bars(df: pd.DataFrame) -> pd.DataFrame:
@@ -602,9 +551,7 @@ def validate_minute_bars(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in ["open", "high", "low", "close", "volume", "hold"]:
         data[col] = pd.to_numeric(data[col], errors="coerce")
-        if data[col].isna().any() or not data[col].map(
-            lambda x: pd.notna(x) and abs(float(x)) != float("inf")
-        ).all():
+        if data[col].isna().any() or not np.isfinite(data[col]).all():
             raise ValueError(f"分钟字段 {col} 存在无效数值")
 
     price_cols = ["open", "high", "low", "close"]
@@ -635,43 +582,6 @@ def parse_market_datetime(value: Any, tz: ZoneInfo = TZ) -> pd.Timestamp:
     else:
         ts = ts.tz_convert(tz)
     return ts
-
-
-def append_quality_records(records: list[dict], log_path: Optional[Path] = None) -> int:
-    """
-    将分钟数据异常记录去重追加写入 JSONL 质量日志。
-    去重依据 (symbol, datetime)：与已有日志条目重复的记录不再重复写入。
-    返回本次实际写入的条数。
-    """
-    if not records:
-        return 0
-
-    log_path = Path(log_path) if log_path else Path(QUALITY_LOG)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    existing = set()
-    if log_path.exists():
-        with log_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                existing.add((item.get("symbol"), item.get("datetime")))
-
-    written = 0
-    with log_path.open("a", encoding="utf-8") as f:
-        for item in records:
-            key = (item["symbol"], item["datetime"])
-            if key in existing:
-                continue
-            existing.add(key)
-            f.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
-            written += 1
-    return written
 
 
 def separate_future_timestamps(
@@ -724,7 +634,7 @@ def separate_future_timestamps(
             keep_mask.append(True)
 
     if future_records:
-        append_quality_records(future_records, log_path)
+        append_jsonl(future_records, log_path)
 
     valid = data[keep_mask].copy()
     return valid.sort_values("datetime").reset_index(drop=True)
@@ -771,7 +681,7 @@ def filter_future_anomalies(
             kept.append(item)
 
     if anomalies:
-        append_quality_records(anomalies, log_path)
+        append_jsonl(anomalies, log_path)
     return kept
 
 
@@ -779,18 +689,11 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
     data = validate_minute_bars(df)
     collected_at = datetime.now(TZ)
     data = separate_future_timestamps(data, symbol, collected_at)
+    minute_csv = get_minute_csv(symbol)
     old_records = []
 
-    if MINUTE_BARS.exists():
-        try:
-            with MINUTE_BARS.open("r", encoding="utf-8") as f:
-                old_records = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            raise RuntimeError(
-                f"现有分钟 JSON 无法安全读取，已停止写入以防覆盖：{exc}"
-            ) from exc
-        if not isinstance(old_records, list):
-            raise ValueError("分钟历史文件格式错误：预期为 JSON 数组")
+    if minute_csv.exists():
+        old_records = csv_to_records(minute_csv)
 
     records = {}
     for item in old_records:
@@ -815,10 +718,12 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
                 "volume": number(row["volume"]),
                 "open_interest": number(row["hold"]),
                 "source": "AKShare futures_zh_minute_sina",
+                "name": SYMBOL_NAME_MAP.get(symbol, "PVC连续"),
             })
         else:
             records[key] = {
                 "symbol": symbol,
+                "name": SYMBOL_NAME_MAP.get(symbol, "PVC连续"),
                 "datetime": timestamp,
                 "open": number(row["open"]),
                 "high": number(row["high"]),
@@ -832,20 +737,8 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
 
     merged = sorted(records.values(), key=lambda x: (x["symbol"], x["datetime"]))
     merged = filter_future_anomalies(merged)
-    temp_path = MINUTE_BARS.with_suffix(".json.tmp")
-    try:
-        with temp_path.open("w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False, indent=2, allow_nan=False)
-            f.write("\n")
-        temp_path.replace(MINUTE_BARS)
-    except Exception:
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
-        raise
-    return len(data), len(merged)
+    count = records_to_csv(merged, minute_csv)
+    return len(data), count
 
 
 def is_after_day_session_close() -> bool:
@@ -898,7 +791,7 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
     返回:
         更新条数，失败返回 None
     """
-    daily_df = ak.futures_zh_daily_sina(symbol=symbol)
+    daily_df = _retryable_call(ak.futures_zh_daily_sina, symbol=symbol)
     if daily_df is None or daily_df.empty:
         raise RuntimeError(f"{symbol} 日线数据为空，停止更新。")
 
@@ -909,16 +802,9 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
 
     validated = validate_daily_bars(daily_df)
     count = update_daily_bars(validated, symbol=symbol)
-    try:
-        json_to_csv(DAILY_BARS, DAILY_BARS_CSV)
-    except Exception as exc:
-        logger.error(
-            "%s 日线 CSV 生成失败: %s；JSON 已更新，CSV 可重建。",
-            symbol, exc,
-        )
     logger.info(
-        "日线 %s（%s）：本次校验 %d 条；更新结果 %d；路径 %s；CSV %s",
-        symbol, session_label, len(validated), count, DAILY_BARS, DAILY_BARS_CSV,
+        "日线 %s（%s）：本次校验 %d 条；更新结果 %d；CSV %s",
+        symbol, session_label, len(validated), count, get_daily_csv(symbol),
     )
     return count
 
@@ -929,25 +815,6 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     OUT.mkdir(parents=True, exist_ok=True)
-
-    # Pre-flight: rebuild CSV if existing JSON/CSV are inconsistent.
-    # JSON is the authoritative data source; CSV is a regenerable derivation.
-    for json_file, csv_file, label in [
-        (MINUTE_BARS, MINUTE_BARS_CSV, "分钟线"),
-        (DAILY_BARS, DAILY_BARS_CSV, "日线"),
-    ]:
-        if json_file.exists() and (
-            not csv_file.exists() or not json_matches_csv(json_file, csv_file)
-        ):
-            logger.info("[修复] %s CSV 缺失或与 JSON 不一致，重新生成中...", label)
-            try:
-                json_to_csv(json_file, csv_file)
-            except Exception as exc:
-                logger.error(
-                    "%s CSV 重建失败: %s，路径 %s；JSON 保持有效，CSV 可在下次运行时重试。",
-                    label, exc, csv_file,
-                )
-                raise SystemExit(1)
 
     # 1. 实时快照（独立运行，不影响其他数据流）
     for sym in ("V0", "V2701"):
@@ -969,20 +836,13 @@ if __name__ == "__main__":
     # 2. 分钟线（独立运行，不依赖日线最新日期是否等于当天）
     for sym in ("V2701", "V0"):
         try:
-            minute_df = ak.futures_zh_minute_sina(symbol=sym, period="1")
+            minute_df = _retryable_call(ak.futures_zh_minute_sina, symbol=sym, period="1")
             if minute_df is None or minute_df.empty:
                 raise RuntimeError(f"{sym} 分钟数据为空，停止更新。")
             updated, total = update_minute_bars(sym, minute_df)
-            try:
-                json_to_csv(MINUTE_BARS, MINUTE_BARS_CSV)
-            except Exception as exc:
-                logger.error(
-                    "%s 分钟线 CSV 生成失败: %s；JSON 已更新，CSV 可重建。",
-                    sym, exc,
-                )
             logger.info(
-                "分钟线 %s：本次校验 %d 条；文件累计 %d 条；路径 %s；CSV %s",
-                sym, updated, total, MINUTE_BARS, MINUTE_BARS_CSV,
+                "分钟线 %s：本次校验 %d 条；文件累计 %d 条；CSV %s",
+                sym, updated, total, get_minute_csv(sym),
             )
         except Exception as exc:
             logger.error("分钟线 %s 更新失败：%s", sym, exc)

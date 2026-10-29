@@ -5,6 +5,7 @@
 使用 unittest（无需 pytest），不访问网络。
 """
 
+import csv
 import json
 import os
 import sys
@@ -128,7 +129,7 @@ class AppendQualityRecordsTests(unittest.TestCase):
     def test_empty_records_no_op(self):
         with tempfile.TemporaryDirectory() as d:
             log = os.path.join(d, "q.jsonl")
-            self.assertEqual(m.append_quality_records([], log_path=log), 0)
+            self.assertEqual(m.append_jsonl([], log_path=log), 0)
             self.assertFalse(os.path.exists(log))
 
 
@@ -189,28 +190,24 @@ class FilterFutureAnomaliesTests(unittest.TestCase):
 
 
 class UpdateMinuteBarsIntegrationTests(unittest.TestCase):
-    """端到端：update_minute_bars 不应把未来记录写入 minute_bars.json。"""
+    """端到端：update_minute_bars 不应把未来记录写入 CSV。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.dir = self.tmp.name
+        self.dir = Path(self.tmp.name)
         self._orig = {
-            "MINUTE_BARS": m.MINUTE_BARS,
-            "MINUTE_BARS_CSV": m.MINUTE_BARS_CSV,
+            "MINUTE_BARS_CSV_V2701": m.get_minute_csv("V2701"),
             "QUALITY_LOG": m.QUALITY_LOG,
             "OUT": m.OUT,
         }
         d = self.dir
-        m.MINUTE_BARS = Path(d) / "minute_bars.json"
-        m.MINUTE_BARS_CSV = Path(d) / "minute_bars.csv"
-        m.QUALITY_LOG = Path(d) / "minute_data_quality.jsonl"
         m.OUT = Path(d)
+        m.QUALITY_LOG = Path(d) / "minute_data_quality.jsonl"
+        m.QUALITY_LOG.parent.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
-        m.MINUTE_BARS = self._orig["MINUTE_BARS"]
-        m.MINUTE_BARS_CSV = self._orig["MINUTE_BARS_CSV"]
-        m.QUALITY_LOG = self._orig["QUALITY_LOG"]
-        m.OUT = self._orig["OUT"]
+        for attr, path in self._orig.items():
+            setattr(m, attr, path)
         self.tmp.cleanup()
 
     def test_future_bar_excluded_from_json(self):
@@ -227,8 +224,9 @@ class UpdateMinuteBarsIntegrationTests(unittest.TestCase):
         ])
 
         saved, total = m.update_minute_bars("V2701", df)
-        with open(m.MINUTE_BARS, encoding="utf-8") as f:
-            records = json.load(f)
+        with open(m.get_minute_csv("V2701"), encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            records = list(reader)
         datetimes = {r["datetime"] for r in records}
         self.assertIn(fmt(past), datetimes)
         self.assertNotIn(fmt(future), datetimes)
