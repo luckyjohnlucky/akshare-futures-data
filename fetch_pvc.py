@@ -8,6 +8,7 @@ import logging
 import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -31,6 +32,9 @@ def _retryable_call(
 ):
     """带指数退避的重试调用。
 
+    仅对 requests.RequestException（网络超时、HTTP 错误等）进行重试；
+    ValueError、RuntimeError 等数据格式异常直接抛出，不重试。
+
     参数:
         func: 要调用的函数
         max_retries: 最大重试次数
@@ -41,7 +45,7 @@ def _retryable_call(
     for attempt in range(1, max_retries + 1):
         try:
             return func(*args, **kwargs)
-        except (requests.RequestException, ValueError, RuntimeError) as exc:
+        except requests.RequestException as exc:
             last_exc = exc
             if attempt < max_retries:
                 delay = min(base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5), max_delay)
@@ -214,7 +218,10 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
     return data
 
 def append_jsonl(records: list[dict], log_path: Path | None = None, key_fields: tuple[str, ...] = ("symbol", "datetime")) -> int:
-    """将记录去重追加写入 JSONL 文件。
+    """将记录去重追加写入 JSONL 文件（原子写入）。
+
+    写入策略：读取现有内容 → 追加新记录 → 写入临时文件 → 原子替换原文件。
+    避免进程崩溃时留下半行损坏的 JSON。
 
     参数:
         records: 要写入的记录列表
@@ -231,28 +238,47 @@ def append_jsonl(records: list[dict], log_path: Path | None = None, key_fields: 
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     existing = set()
+    existing_lines = []
     if log_path.exists():
         with log_path.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
+                existing_lines.append(line)
                 try:
                     item = json.loads(line)
                     existing.add(tuple(item.get(k) for k in key_fields))
                 except json.JSONDecodeError:
-                    continue
+                    # 损坏行保留，不参与去重键判断
+                    pass
 
-    written = 0
-    with log_path.open("a", encoding="utf-8") as f:
-        for item in records:
-            key = tuple(item.get(k) for k in key_fields)
-            if key in existing:
-                continue
-            existing.add(key)
-            f.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
-            written += 1
-    return written
+    new_lines = []
+    for item in records:
+        key = tuple(item.get(k) for k in key_fields)
+        if key in existing:
+            continue
+        existing.add(key)
+        new_lines.append(json.dumps(item, ensure_ascii=False, allow_nan=False))
+
+    if not new_lines:
+        return 0
+
+    all_lines = existing_lines + new_lines
+    temp_path = log_path.with_name(log_path.name + ".tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as f:
+            for line in all_lines:
+                f.write(line + "\n")
+        temp_path.replace(log_path)
+    except Exception:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+        raise
+    return len(new_lines)
 
 
 def fetch_sina_spot(symbol: str = "V0") -> Optional[dict]:
@@ -420,29 +446,9 @@ def records_to_csv(records: list[dict], csv_path: Path) -> int:
     写入临时文件，成功后原子替换，避免留下半成品。
     """
     if not records:
-        # 无记录时写入仅含 header 的 CSV，清空旧数据（防止异常记录残留）
+        # 无记录时不修改现有文件，直接返回 0，避免意外清空旧数据
         if not csv_path.exists():
             return 0
-        fieldnames = []
-        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames:
-                fieldnames = list(reader.fieldnames)
-        temp_path = csv_path.with_name(csv_path.name + ".tmp")
-        try:
-            with temp_path.open("w", encoding="utf-8-sig", newline="") as f:
-                writer = csv.DictWriter(
-                    f, fieldnames=fieldnames, extrasaction="ignore"
-                )
-                writer.writeheader()
-            temp_path.replace(csv_path)
-        except Exception:
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except OSError:
-                pass
-            raise
         return 0
 
     fieldnames = []
@@ -804,10 +810,9 @@ if __name__ == "__main__":
     )
     OUT.mkdir(parents=True, exist_ok=True)
 
-    # 1. 实时快照（独立运行，不影响其他数据流）
-    for sym in ("V0", "V2701"):
+    def _run_realtime_snapshot(symbol: str):
         try:
-            snapshot = collect_realtime_snapshot(symbol=sym)
+            snapshot = collect_realtime_snapshot(symbol=symbol)
             if snapshot:
                 logger.info(
                     "实时快照 %s：已保存，行情时间 %s %s，采集时间 %s",
@@ -821,27 +826,36 @@ if __name__ == "__main__":
         except Exception as exc:
             logger.error("实时快照 %s 采集失败（不影响其他流程）：%s", sym, exc)
 
-    # 2. 分钟线（独立运行，不依赖日线最新日期是否等于当天）
-    for sym in ("V2701", "V0"):
+    def _run_minute_bars(symbol: str):
         try:
-            minute_df = _retryable_call(ak.futures_zh_minute_sina, symbol=sym, period="1")
+            minute_df = _retryable_call(ak.futures_zh_minute_sina, symbol=symbol, period="1")
             if minute_df is None or minute_df.empty:
-                raise RuntimeError(f"{sym} 分钟数据为空，停止更新。")
-            updated, total = update_minute_bars(sym, minute_df)
+                raise RuntimeError(f"{symbol} 分钟数据为空，停止更新。")
+            updated, total = update_minute_bars(symbol, minute_df)
             logger.info(
                 "分钟线 %s：本次校验 %d 条；文件累计 %d 条；CSV %s",
-                sym, updated, total, get_minute_csv(sym),
+                symbol, updated, total, get_minute_csv(symbol),
             )
         except Exception as exc:
-            logger.error("分钟线 %s 更新失败：%s", sym, exc)
+            logger.error("分钟线 %s 更新失败：%s", symbol, exc)
 
-    # 3. 日线（白盘收盘后采集完整日线）
-    for sym in ("V0", "V2701"):
+    def _run_daily_bars(symbol: str):
         try:
             if is_after_market_close():
-                fetch_and_update_daily_bars(sym, "完整")
+                fetch_and_update_daily_bars(symbol, "完整")
             else:
-                logger.info("日线 %s：未到采集时间，跳过", sym)
-
+                logger.info("日线 %s：未到采集时间，跳过", symbol)
         except Exception as exc:
-            logger.error("日线 %s 更新失败（不影响其他流程）：%s", sym, exc)
+            logger.error("日线 %s 更新失败（不影响其他流程）：%s", symbol, exc)
+
+    # 三个数据流相互独立，并行执行；每个品种的每个流程作为独立任务
+    tasks = []
+    for sym in ("V0", "V2701"):
+        tasks.append(("realtime", sym, _run_realtime_snapshot))
+        tasks.append(("minute", sym, _run_minute_bars))
+        tasks.append(("daily", sym, _run_daily_bars))
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = [executor.submit(fn, sym) for _, sym, fn in tasks]
+        for future in as_completed(futures):
+            future.result()  # 抛出任务内部可能的异常（已在各函数内 catch，此处仅确保完成）
