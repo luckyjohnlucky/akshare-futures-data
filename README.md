@@ -1,12 +1,11 @@
 # akshare-futures-data
 
-采集 PVC 连续合约（`V0`/`V2701`）的历史日线与分钟行情，执行质量校验、去重与合并，
-并输出结构化 CSV 与实时快照 JSONL。
+Collect historical daily and minute bars for PVC continuous contracts (`V0`/`V2701`), perform quality validation, deduplication and merging, and output structured CSV and real-time snapshot JSONL.
 
-## 环境
+## Environment
 
-- Python 3.9+（虚拟环境使用 Python 3.13）
-- 依赖见 `requirements.txt`；建议使用虚拟环境：
+- Python 3.9+ (virtual environment uses Python 3.13)
+- Dependencies in `requirements.txt`; recommended to use a virtual environment:
 
 ```bash
 python3 -m venv .venv
@@ -14,164 +13,133 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-## 运行
+## Running
 
 ```bash
 python fetch_pvc.py
 ```
 
-执行顺序（各流程相互独立，单流程失败不影响其他流程）：
+Execution order (each stream is independent, single stream failure does not affect others):
 
-1. **实时快照**：抓取 `V2701`/`V0` 新浪 HTTP API 实时行情 → 严格校验源日期/源时间 →
-   写入 `output/V0_realtime_snapshots.jsonl` / `output/V2701_realtime_snapshots.jsonl`。
-2. **分钟线**：抓取 `V2701`/`V0` AKShare 1 分钟行情 → `validate_minute_bars` 校验 →
-   `separate_future_timestamps` 过滤采集后未到时间的 bar（以 `Asia/Shanghai`
-   时区 `collected_at` 为基准，容差 1 分钟）
-   → `update_minute_bars` 合并历史并原子写入 `output/V0_minute_bars.csv` /
-   `output/V2701_minute_bars.csv`。
-3. **日线**：白盘收盘后（15:00+，周一至周五）抓取 `V0`/`V2701` AKShare 日线 →
-   `validate_daily_bars` 校验 → `update_daily_bars` 合并历史并原子写入
-   `output/V0_daily_bars.csv` / `output/V2701_daily_bars.csv`。
+1. **Real-time snapshot**: Fetch `V2701`/`V0` Sina HTTP API real-time quote → strictly validate source date/source time → write to `output/V0_realtime_snapshots.jsonl` / `output/V2701_realtime_snapshots.jsonl`.
+2. **Minute bars**: Fetch `V2701`/`V0` AKShare 1-minute quote → `validate_minute_bars` validation → `separate_future_timestamps` filter bars after collection time (based on `Asia/Shanghai` timezone `collected_at`, 1-minute tolerance) → `update_minute_bars` merge history and atomically write to `output/V0_minute_bars.csv` / `output/V2701_minute_bars.csv`.
+3. **Daily bars**: After day session close (15:00+, Monday to Friday) fetch `V0`/`V2701` AKShare daily bars → `validate_daily_bars` validation → `update_daily_bars` merge history and atomically write to `output/V0_daily_bars.csv` / `output/V2701_daily_bars.csv`.
 
-### 各流程执行机制
+### Stream Execution Mechanisms
 
-#### 并行执行
+#### Parallel Execution
 
-三个数据流（实时快照、分钟线、日线）相互独立，使用 `ThreadPoolExecutor` 并行执行。每个品种的每个流程作为独立任务提交，总耗时取决于最慢的单个任务，而非所有任务累加。
+Three data streams (real-time snapshot, minute bars, daily bars) are independent, executed using `ThreadPoolExecutor`. Each symbol's each stream is submitted as an independent task; total duration depends on the slowest individual task, not the sum of all tasks.
 
-预期速度提升：
-- 15:00 后（6 个任务）：总耗时降低约 60%-70%，提升倍数 3-4 倍
-- 15:00 前（4 个任务，日线跳过）：总耗时降低约 50-60%，提升倍数 2-3 倍
+Expected speedup:
+- After 15:00 (6 tasks): total duration reduced by about 60%-70%, speedup 3-4x
+- Before 15:00 (4 tasks, daily bars skipped): total duration reduced by about 50%-60%, speedup 2-3x
 
-并行安全性：不同 symbol（V0/V2701）操作不同文件，不存在竞态条件；失败隔离良好，单流程失败不影响其他流程。
+Parallel execution safety: different symbols (V0/V2701) operate on different files, no race condition; good failure isolation, single stream failure does not affect others.
 
-#### 实时快照（独立流程）
+#### Real-time Snapshot (Independent Stream)
 
-- 数据源：新浪 HTTP API (`https://hq.sinajs.cn/list=nf_{symbol}`)，不使用 akshare
-  `futures_zh_spot`（后者存在列数不匹配缺陷）。
-- 字段：`source_date` / `source_time` 来自数据源本身，`collected_at` 记录实际采集时间，
-  两者不混淆。
-- 校验：`source_date` 必须为有效日历日期；`source_time` 必须为合法 HHMMSS；
-  否则拒绝写入，不留空记录。
-- 交易日推定：21:00 及之后的夜盘归入下一自然日（`infer_trading_date`）。
-- 写盘：JSONL 追加写入，以 `(symbol, source_date, source_time)` 为去重键，
-  同一条快照不重复追加。
-- 失败处理：API 异常返回 `None`，不写入文件，不影响其他流程。
+- Data source: Sina HTTP API (`https://hq.sinajs.cn/list=nf_{symbol}`), does not use akshare `futures_zh_spot` (the latter has a column count mismatch defect).
+- Fields: `source_date` / `source_time` come from the data source itself, `collected_at` records actual collection time; the two are not confused.
+- Validation: `source_date` must be a valid calendar date; `source_time` must be a valid HHMMSS; otherwise refuse writing, no empty records left.
+- Trading date inference: night sessions at 21:00 and later are assigned to the next calendar day (`infer_trading_date`).
+- Write: JSONL append write, with `(symbol, source_date, source_time)` as deduplication key; the same snapshot is not appended repeatedly.
+- Failure handling: API exception returns `None`, no file written, does not affect other streams.
 
-#### 分钟线（独立流程）
+#### Minute Bars (Independent Stream)
 
-- 数据源：`ak.futures_zh_minute_sina(symbol=symbol, period="1")`。
-- 校验：`validate_minute_bars` 检查必填字段（`datetime, open, high, low, close,
-  volume, hold`）、无效时间戳、重复时间戳、非正 OHLC、OHLC 逻辑关系、
-  非负成交量/持仓量。
-- 未来时间戳过滤：`separate_future_timestamps` 以 `collected_at + 1 分钟` 为阈值，
-  剔除晚于阈值的 bar，记录至 `output/minute_data_quality.jsonl`；
-  `update_minute_bars` 合并历史后再通过 `filter_future_anomalies` 二次清理旧文件残留异常。
-- 写盘：以 `(symbol, datetime)` 为去重键，旧记录保留原始 `collected_at`，
-  仅更新行情字段；新记录写入当前 `collected_at`。
-- 失败处理：API 异常或校验失败抛出异常，**不改动**已有分钟线文件。
+- Data source: `ak.futures_zh_minute_sina(symbol=symbol, period="1")`.
+- Validation: `validate_minute_bars` checks required fields (`datetime, open, high, low, close, volume, hold`), invalid timestamps, duplicate timestamps, non-positive OHLC, OHLC logical relationships, non-negative volume/open interest.
+- Future timestamp filtering: `separate_future_timestamps` uses `collected_at + 1 minute` as threshold, filters out bars later than the threshold, records to `output/minute_data_quality.jsonl`; `update_minute_bars` after merging history re-cleans old file residual anomalies via `filter_future_anomalies`.
+- Write: with `(symbol, datetime)` as deduplication key, old records keep original `collected_at`, only quote fields are updated; new records write current `collected_at`.
+- Failure handling: API exception or validation failure raises exception, **does not modify** existing minute bar files.
 
-#### 日线（独立流程）
+#### Daily Bars (Independent Stream)
 
-- 数据源：`ak.futures_zh_daily_sina(symbol=symbol)`。
-- 采集时机：北京时间 15:00 后，周一至周五（`is_after_market_close()`）。
-  白盘收盘后，前一夜盘与今日日盘数据即齐备，可采集当日交易日完整日线。
-  夜盘（21:00-23:00）归入下一交易日，不影响今日日线完整性。
-  周末不采集。
-- 校验：`validate_daily_bars` 检查必填字段（`date, open, high, low, close,
-  volume, hold, settle`）、日期有效性与去重、OHLC 正数与逻辑关系、
-  结算价非负（允许 0 表示缺失，写入时转为 `None`）、成交量/持仓量非负。
-  已知异常日期（`2011-01-03`, `2020-08-06`）的 OHLC 异常仅标记
-  `quality_status="invalid_ohlc"`，不拒绝写入；未登记的 OHLC 异常会拒绝写入。
-- 写盘：以 `(symbol, trading_date)` 为去重键，旧记录被新数据覆盖，
-  其余历史原样保留；全量排序后通过临时文件 + 原子替换写回 CSV。
-- 失败处理：API 异常或校验失败抛出异常，**不改动**已有日线文件。
+- Data source: `ak.futures_zh_daily_sina(symbol=symbol)`.
+- Collection timing: after 15:00 Beijing time, Monday to Friday (`is_after_market_close()`). After day session close, the previous night session and today's day session data are ready, so complete daily bars for the current trading day can be collected. Night sessions (21:00-23:00) are assigned to the next trading day, do not affect today's daily bar completeness. No collection on weekends.
+- Validation: `validate_daily_bars` checks required fields (`date, open, high, low, close, volume, hold, settle`), date validity and deduplication, positive OHLC and OHLC logical relationships, non-negative settle price (allows 0 for missing, written as `None`), non-negative volume/open interest. Known anomaly dates (`2011-01-03`, `2020-08-06`) OHLC anomalies are only marked `quality_status="invalid_ohlc"`, not refused; unregistered OHLC anomalies will refuse writing.
+- Write: with `(symbol, trading_date)` as deduplication key, old records are overwritten by new data, other history is kept as-is; full sort then written back to CSV via temp file + atomic replace.
+- Failure handling: API exception or validation failure raises exception, **does not modify** existing daily bar files.
 
-## 数据目录 (`output/`)
+## Data Directory (`output/`)
 
-| 文件 | 说明 |
-|------|------|
-| `output/V0_minute_bars.csv` | V0 分钟 Bar，按 `(symbol, datetime)` 去重合并，按时间升序。 |
-| `output/V2701_minute_bars.csv` | V2701 分钟 Bar，按 `(symbol, datetime)` 去重合并，按时间升序。 |
-| `output/V0_daily_bars.csv` | V0 日线，按 `(symbol, trading_date)` 去重合并，按日期升序。 |
-| `output/V2701_daily_bars.csv` | V2701 日线，按 `(symbol, trading_date)` 去重合并，按日期升序。 |
-| `output/V0_realtime_snapshots.jsonl` | V0 实时快照流（JSONL，追加写入）。 |
-| `output/V2701_realtime_snapshots.jsonl` | V2701 实时快照流（JSONL，追加写入）。 |
-| `output/minute_data_quality.jsonl` | 因异常（如 `future_timestamp`）被排除的分钟记录明细（全局）。 |
+| File | Description |
+|------|-------------|
+| `output/V0_minute_bars.csv` | V0 minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/V2701_minute_bars.csv` | V2701 minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/V0_daily_bars.csv` | V0 daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/V2701_daily_bars.csv` | V2701 daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/V0_realtime_snapshots.jsonl` | V0 real-time snapshot stream (JSONL, append write). |
+| `output/V2701_realtime_snapshots.jsonl` | V2701 real-time snapshot stream (JSONL, append write). |
+| `output/minute_data_quality.jsonl` | Minute records excluded due to anomalies (e.g., `future_timestamp`) (global). |
 
-## 质量过滤规则
+## Quality Filtering Rules
 
-- **未来时间戳 (`future_timestamp`)**：`datetime > collected_at + 1 分钟`
-  (统一 `Asia/Shanghai` 时区)。
-  - 新抓取的数据在合并前过滤；
-  - 合并历史后亦会重新校验（`filter_future_anomalies`），避免旧文件残留异常被保留。
-  - 异常记录原件写入 `minute_data_quality.jsonl`，以 `(symbol, datetime)` 去重；
-    **不修改**异常记录的原始时间戳。
-- **日线 OHLC 校验**：`high >= max(open, close, low)` 且 `low <= min(open, close, high)`；
-  未登记异常会拒绝写入，已知异常（`2011-01-03`, `2020-08-06`）仅标记 `invalid_ohlc`。
-- **分钟线 OHLC 校验**：同日线逻辑，异常直接拒绝写入。
-- **成交量/持仓量**：必须非负，缺失时日线字段转为 `None`，分钟线直接拒绝。
+- **Future timestamp (`future_timestamp`)**: `datetime > collected_at + 1 minute` (unified `Asia/Shanghai` timezone).
+  - Newly collected data is filtered before merging.
+  - After merging history, re-validated via `filter_future_anomalies` to avoid retaining anomalies left in old files.
+  - Exception records are written as-is to `minute_data_quality.jsonl`, deduplicated by `(symbol, datetime)`; **original timestamps of exception records are not modified**.
+- **Daily bar OHLC check**: `high >= max(open, close, low)` and `low <= min(open, close, high)`; unregistered anomalies refuse writing, known anomalies (`2011-01-03`, `2020-08-06`) are only marked `invalid_ohlc`.
+- **Minute bar OHLC check**: Same logic as daily bars; anomalies directly refuse writing.
+- **Volume / open interest**: Must be non-negative; missing values result in `None` for daily bar fields, minute bars are directly rejected.
 
-## 大商所交易时间安排（PVC / 聚氯乙烯 `v`）
+## DCE Trading Schedule (PVC / Polyvinyl Chloride `v`)
 
-| 时段 | 时间 | 适用日 |
-|------|------|--------|
-| 日盘集合竞价申报 | 08:55 - 08:59 | 周一至周五 |
-| 日盘集合竞价撮合 | 08:59 - 09:00 | 周一至周五 |
-| 日盘第一节 | 09:00 - 10:15 | 周一至周五 |
-| 小节休息 | 10:15 - 10:30 | 周一至周五 |
-| 日盘第二节 | 10:30 - 11:30 | 周一至周五 |
-| 日盘第三节 | 13:30 - 15:00 | 周一至周五 |
-| 夜盘集合竞价申报 | 20:55 - 20:59 | 周一至周五 |
-| 夜盘集合竞价撮合 | 20:59 - 21:00 | 周一至周五 |
-| 夜盘连续竞价 | 21:00 - 23:00 | 周一至周五 |
+| Session | Time | Applicable Day |
+|---------|------|----------------|
+| Day session opening auction declaration | 08:55 - 08:59 | Monday to Friday |
+| Day session opening auction matching | 08:59 - 09:00 | Monday to Friday |
+| Day session first period | 09:00 - 10:15 | Monday to Friday |
+| Short break | 10:15 - 10:30 | Monday to Friday |
+| Day session second period | 10:30 - 11:30 | Monday to Friday |
+| Day session third period | 13:30 - 15:00 | Monday to Friday |
+| Night session opening auction declaration | 20:55 - 20:59 | Monday to Friday |
+| Night session opening auction matching | 20:59 - 21:00 | Monday to Friday |
+| Night session continuous auction | 21:00 - 23:00 | Monday to Friday |
 
-### 采集时机规则
+### Collection Timing Rules
 
-- **完整日线**：北京时间 15:00 后，周一至周五可采集（`is_after_market_close` / `is_after_day_session_close`）
-  - 白盘收盘后，前一夜盘与今日日盘数据即齐备，可采集当日交易日完整日线
-  - 夜盘归入下一交易日，不影响今日日线完整性
-- **周末**：不采集
+- **Complete daily bars**: Beijing time after 15:00, Monday to Friday can collect (`is_after_market_close` / `is_after_day_session_close`).
+  - After day session close, the previous night session and today's day session data are ready, so complete daily bars for the current trading day can be collected.
+  - Night sessions are assigned to the next trading day, do not affect today's daily bar completeness.
+- **Weekend**: No collection.
 
-### 交易日推定
+### Trading Date Inference
 
-- 21:00 及之后的夜盘行情，归入**下一自然日**作为交易日（`infer_trading_date`）
-- 白盘行情，交易日即为当前自然日
+- Night session quotes at 21:00 and later are assigned to the **next calendar day** as the trading day (`infer_trading_date`).
+- Day session quotes: the trading day is the current natural day.
 
-> 注：法定节假日前第一个工作日无夜盘，代码尚未接入大商所交易所日历，此类情况需手动跳过或后续补全日历校验。
+> Note: The first working day before a statutory holiday has no night session; the code has not yet connected to the DCE trading calendar. This situation requires manual skipping or future calendar check completion.
 
-## 测试
+## Testing
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-所有测试使用临时目录和 Mock，不访问真实网络，不读写正式数据文件。
+All tests use temporary directories and Mocks, do not access the real network, do not read or write formal data files.
 
-## GitHub 工作流（手动触发）
+## GitHub Workflow (Manual Trigger)
 
-- 工作流：`.github/workflows/collect.yml`，触发方式为 `workflow_dispatch`（手动）。
-- 触发者：NAS 手动发出 GitHub Actions 命令执行，无定时自动触发。
-- 并发控制：`concurrency.group: pvc-collect`，`cancel-in-progress: false`，
-  避免并发运行导致推送冲突。
-- 推送策略：`git fetch + rebase origin/main`，推送失败时最多重试 3 次，
-  每次重试间隔 5 秒。
+- Workflow: `.github/workflows/collect.yml`, trigger method is `workflow_dispatch` (manual).
+- Trigger: NAS manually issues GitHub Actions command to execute, no scheduled automatic trigger.
+- Concurrency control: `concurrency.group: pvc-collect`, `cancel-in-progress: false`, avoids push conflicts caused by concurrent runs.
+- Push strategy: `git fetch + rebase origin/main`, push failure retries up to 3 times, 5 seconds interval between retries.
 
-## 安全约定
+## Safety Conventions
 
-- 写盘采用“临时文件 + 原子替换” (`rename`)，避免半成品；
-- 接口返回空/`None` 或校验失败时，抛出异常并**不改动**已有行情文件；
-- 工作流 `git push` 前执行 `git fetch + rebase`，失败时最多重试 3 次，
-  避免并发提交导致推送被拒绝；
-- 各流程相互独立，单流程失败不影响其他流程。
+- Writes use "temp file + atomic replace" (`rename`), avoiding half-finished output.
+- Interface returns empty/`None` or validation failure raises exception and **does not modify** existing quote files.
+- Workflow `git push` executes `git fetch + rebase` before push, failure retries up to 3 times, avoids push rejection caused by concurrent submissions.
+- Each stream is independent, single stream failure does not affect other streams.
 
-## 已知局限性
+## Known Limitations
 
-| 项目 | 说明 | 影响 | 建议 |
-|------|------|------|------|
-| 节假日日历 | 法定节假日前第一个工作日无夜盘，代码尚未接入大商所交易所日历 | 节假日前可能过早采集完整日线 | 手动跳过或后续补全日历校验 |
-| `known_bad_dates` 硬编码 | OHLC 已知异常日期（`2011-01-03`, `2020-08-06`）硬编码在代码中 | 新增异常日期需修改代码 | 移至配置文件或环境变量 |
-| 数据保留策略 | 日线/分钟线 CSV 无数据保留期限，会无限增长 | 长期运行会导致仓库体积膨胀 | 补充只保留最近 N 个月数据的策略 |
-| 注释语言 | 中英文注释混杂 | 不影响功能，但阅读体验不一致 | 统一注释语言 |
-| JSONL 原子性 | JSONL 追加写入虽已改为原子替换，但单行损坏不影响其他行 | 极端情况下部分快照可能丢失 | 可接受，JSONL 行独立特性 |
-
+| Item | Description | Impact | Suggestion |
+|------|-------------|--------|------------|
+| Holiday calendar | The first working day before a statutory holiday has no night session; the code has not yet connected to the DCE trading calendar | Complete daily bars may be collected too early before holidays | Manual skip or complete calendar check later |
+| `known_bad_dates` hardcoded | OHLC known anomaly dates (`2011-01-03`, `2020-08-06`) are hardcoded in code | Adding new anomaly dates requires code modification | Move to configuration file or environment variable |
+| Data retention policy | Daily/minute CSV has no data retention period, grows indefinitely | Long-term operation causes repository bloat | Add policy to keep only recent N months of data |
+| Comment language | Mixed Chinese and English comments | Does not affect functionality, but reading experience is inconsistent | Unify comment language |
+| JSONL atomicity | JSONL append write has been changed to atomic replace, but a single corrupted line does not affect other lines | Partial snapshots may be lost in extreme cases | Acceptable, JSONL line independence feature |
