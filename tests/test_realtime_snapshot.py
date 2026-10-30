@@ -342,11 +342,21 @@ class IsAfterMarketCloseTests(unittest.TestCase):
         self.assertIsInstance(m.is_after_market_close(), bool)
 
     @patch("fetch_pvc.datetime")
-    def test_friday_after_close(self, mock_dt):
-        """Friday 15:00+ → True (no night session, day close at 15:00)."""
+    def test_friday_day_before_close(self, mock_dt):
+        """Friday 15:00 → False (night session still active, close at 23:00)."""
         tz = ZoneInfo("Asia/Shanghai")
         friday_3pm = datetime(2026, 10, 30, 15, 0, 0, tzinfo=tz)  # Friday
         mock_dt.now.return_value = friday_3pm
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        self.assertFalse(m.is_after_market_close())
+
+    @patch("fetch_pvc.datetime")
+    def test_friday_night_after_close(self, mock_dt):
+        """Friday 23:00+ → True (after night session close)."""
+        tz = ZoneInfo("Asia/Shanghai")
+        friday_23pm = datetime(2026, 10, 30, 23, 5, 0, tzinfo=tz)  # Friday
+        mock_dt.now.return_value = friday_23pm
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
 
         self.assertTrue(m.is_after_market_close())

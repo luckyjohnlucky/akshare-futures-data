@@ -764,21 +764,21 @@ def is_after_market_close() -> bool:
 
     PVC 交易时间（大商所）：
     - 白盘：09:00-15:00
-    - 夜盘：21:00-23:00（周日至周四）
+    - 夜盘：21:00-23:00（周一至周五，含周五）
 
-    周五无夜盘，收盘后（15:00）即可获取当周最后一个日线。
-    其他交易日夜盘收盘后（23:00）即可获取完整日线。
+    注意：法定节假日前第一个工作日无夜盘，尚未接入交易所日历，
+    该情况需手动跳过或后续补全日历校验。
+
     周末休市时返回 False，避免无意义的 API 调用。
     """
     now = datetime.now(TZ)
     weekday = now.weekday()  # 0=Mon … 5=Sat, 6=Sun
     hhmm = int(now.strftime("%H%M"))
 
-    if weekday == 4:
-        return hhmm >= 1500
-    if 0 <= weekday <= 3:
-        return hhmm >= 2300
-    return False
+    if weekday >= 5:  # 周末休市
+        return False
+    # 周一至周五：夜盘 23:00 后即可获取完整日线（含周五夜盘）
+    return hhmm >= 2300
 
 def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int]:
     """
