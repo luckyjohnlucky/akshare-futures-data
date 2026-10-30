@@ -172,11 +172,11 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
         data[column] = values
 
     settle = pd.to_numeric(data["settle"], errors="coerce")
-    if settle.isna().any():
-        raise ValueError("结算价存在缺失或非数值")
-    if not np.isfinite(settle).all():
+    # NaN 表示缺失（源数据用 0 表示缺失，写入时转为 None），允许；
+    # 但非 NaN 的非有限值（inf）和负值不允许。
+    if (~settle.isna() & ~np.isfinite(settle)).any():
         raise ValueError("结算价存在非有限值")
-    if (settle < 0).any():
+    if (~settle.isna() & (settle < 0)).any():
         raise ValueError("结算价存在负值")
     data["settle"] = settle
 
@@ -835,14 +835,11 @@ if __name__ == "__main__":
         except Exception as exc:
             logger.error("分钟线 %s 更新失败：%s", sym, exc)
 
-    # 3. 日线（独立运行，白盘收盘后采集白盘日线，完全收盘后采集完整日线）
-    #    互斥：当完全收盘条件满足时，只采集完整日线；否则采集白盘日线。
+    # 3. 日线（白盘收盘后采集完整日线）
     for sym in ("V0", "V2701"):
         try:
             if is_after_market_close():
                 fetch_and_update_daily_bars(sym, "完整")
-            elif is_after_day_session_close():
-                fetch_and_update_daily_bars(sym, "白盘")
             else:
                 logger.info("日线 %s：未到采集时间，跳过", sym)
 
