@@ -342,21 +342,11 @@ class IsAfterMarketCloseTests(unittest.TestCase):
         self.assertIsInstance(m.is_after_market_close(), bool)
 
     @patch("fetch_pvc.datetime")
-    def test_friday_day_before_close(self, mock_dt):
-        """Friday 15:00 → False (night session still active, close at 23:00)."""
+    def test_friday_after_close(self, mock_dt):
+        """Friday 15:00+ → True (day session closed, complete daily bar available)."""
         tz = ZoneInfo("Asia/Shanghai")
         friday_3pm = datetime(2026, 10, 30, 15, 0, 0, tzinfo=tz)  # Friday
         mock_dt.now.return_value = friday_3pm
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        self.assertFalse(m.is_after_market_close())
-
-    @patch("fetch_pvc.datetime")
-    def test_friday_night_after_close(self, mock_dt):
-        """Friday 23:00+ → True (after night session close)."""
-        tz = ZoneInfo("Asia/Shanghai")
-        friday_23pm = datetime(2026, 10, 30, 23, 5, 0, tzinfo=tz)  # Friday
-        mock_dt.now.return_value = friday_23pm
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
 
         self.assertTrue(m.is_after_market_close())
@@ -372,18 +362,18 @@ class IsAfterMarketCloseTests(unittest.TestCase):
         self.assertFalse(m.is_after_market_close())
 
     @patch("fetch_pvc.datetime")
-    def test_weekday_night_after_close(self, mock_dt):
-        """Weekday (Mon-Thu) 23:00+ → True (after night session close)."""
+    def test_weekday_after_close(self, mock_dt):
+        """Weekday (Mon-Thu) 15:00+ → True (day session closed)."""
         tz = ZoneInfo("Asia/Shanghai")
-        monday_midnight = datetime(2026, 10, 26, 23, 5, 0, tzinfo=tz)  # Monday
-        mock_dt.now.return_value = monday_midnight
+        monday_3pm = datetime(2026, 10, 26, 15, 0, 0, tzinfo=tz)  # Monday
+        mock_dt.now.return_value = monday_3pm
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
 
         self.assertTrue(m.is_after_market_close())
 
     @patch("fetch_pvc.datetime")
-    def test_weekday_day_before_close(self, mock_dt):
-        """Weekday (Mon-Thu) before 23:00 → False (night session still active)."""
+    def test_weekday_before_close(self, mock_dt):
+        """Weekday (Mon-Thu) before 15:00 → False."""
         tz = ZoneInfo("Asia/Shanghai")
         monday_10am = datetime(2026, 10, 26, 10, 0, 0, tzinfo=tz)  # Monday
         mock_dt.now.return_value = monday_10am

@@ -83,8 +83,9 @@ python -m unittest discover -s tests -v
 
 ### 采集时机规则
 
-- **白盘日线**：北京时间 15:30 后，周一至周五可采集（`is_after_day_session_close`）
-- **完整日线**：北京时间 23:00 后，周一至周五可采集（`is_after_market_close`，含周五夜盘）
+- **完整日线**：北京时间 15:00 后，周一至周五可采集（`is_after_market_close` / `is_after_day_session_close`）
+  - 白盘收盘后，前一夜盘与今日日盘数据即齐备，可采集当日交易日完整日线
+  - 夜盘归入下一交易日，不影响今日日线完整性
 - **周末**：不采集
 
 ### 交易日推定

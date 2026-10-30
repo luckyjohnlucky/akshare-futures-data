@@ -742,10 +742,11 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
 
 
 def is_after_day_session_close() -> bool:
-    """白盘收盘后，可采集白盘日线数据。
+    """白盘收盘后，可采集完整日线数据。
 
     PVC 白盘交易时间（大商所）：09:00-15:00。
-    15:30 后白盘日线数据即可获取，无需等到夜盘收盘。
+    白盘收盘后（15:00），前一夜盘与今日日盘数据即齐备，
+    可采集当日交易日完整日线（夜盘归入下一交易日，不影响今日）。
     周末休市时返回 False。
     """
     now = datetime.now(TZ)
@@ -754,31 +755,18 @@ def is_after_day_session_close() -> bool:
 
     if weekday >= 5:  # 周末休市
         return False
-    # 周一到周五：白盘 15:30 后可采集当日白盘日线
-    return hhmm >= 1530
+    # 周一到周五：白盘 15:00 后即可采集当日完整日线
+    return hhmm >= 1500
 
 
 def is_after_market_close() -> bool:
+    """判断当前北京时间是否已过 PVC 交易当日收盘。
+
+    与 is_after_day_session_close() 保持一致：白盘 15:00 后即可采集。
+    不再区分 23:00 夜盘收盘，夜盘归入下一交易日，由 infer_trading_date
+    处理日期推定。
     """
-    判断当前北京时间是否已过 PVC 交易当日收盘。
-
-    PVC 交易时间（大商所）：
-    - 白盘：09:00-15:00
-    - 夜盘：21:00-23:00（周一至周五，含周五）
-
-    注意：法定节假日前第一个工作日无夜盘，尚未接入交易所日历，
-    该情况需手动跳过或后续补全日历校验。
-
-    周末休市时返回 False，避免无意义的 API 调用。
-    """
-    now = datetime.now(TZ)
-    weekday = now.weekday()  # 0=Mon … 5=Sat, 6=Sun
-    hhmm = int(now.strftime("%H%M"))
-
-    if weekday >= 5:  # 周末休市
-        return False
-    # 周一至周五：夜盘 23:00 后即可获取完整日线（含周五夜盘）
-    return hhmm >= 2300
+    return is_after_day_session_close()
 
 def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int]:
     """
