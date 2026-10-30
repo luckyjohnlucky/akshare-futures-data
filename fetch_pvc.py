@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""采集 PVC 连续合约实时快照与历史日线。"""
+"""Collect PVC futures contract real-time snapshots and historical daily bars."""
 from __future__ import annotations
 
 import csv
@@ -30,16 +30,17 @@ def _retryable_call(
     *args,
     **kwargs,
 ):
-    """带指数退避的重试调用。
+    """Retry call with exponential backoff.
 
-    仅对 requests.RequestException（网络超时、HTTP 错误等）进行重试；
-    ValueError、RuntimeError 等数据格式异常直接抛出，不重试。
+    Only retry on requests.RequestException (network timeout, HTTP errors, etc.);
+    ValueError, RuntimeError and other data format exceptions are raised directly
+    without retry.
 
-    参数:
-        func: 要调用的函数
-        max_retries: 最大重试次数
-        base_delay: 基础延迟秒数
-        max_delay: 最大延迟秒数
+    Parameters:
+        func: Function to call
+        max_retries: Maximum number of retries
+        base_delay: Base delay in seconds
+        max_delay: Maximum delay in seconds
     """
     last_exc = None
     for attempt in range(1, max_retries + 1):
@@ -72,17 +73,17 @@ SYMBOL_NAME_MAP = {
 
 
 def get_daily_csv(symbol: str) -> Path:
-    """返回指定品种的日线 CSV 路径。"""
+    """Return the daily CSV path for the given symbol."""
     return OUT / f"{symbol}_daily_bars.csv"
 
 
 def get_minute_csv(symbol: str) -> Path:
-    """返回指定品种的分钟线 CSV 路径。"""
+    """Return the minute CSV path for the given symbol."""
     return OUT / f"{symbol}_minute_bars.csv"
 
 
 def get_snapshot_file(symbol: str) -> Path:
-    """返回指定品种的实时快照 JSONL 路径。"""
+    """Return the real-time snapshot JSONL path for the given symbol."""
     return OUT / f"{symbol}_realtime_snapshots.jsonl"
 
 
@@ -91,7 +92,7 @@ FUTURE_TIMESTAMP_TOLERANCE = timedelta(minutes=1)
 
 
 def clean(value: Any) -> Any:
-    """将 Pandas/Numpy 值转换成可序列化的普通 Python 值。"""
+    """Convert Pandas/Numpy values to serializable plain Python values."""
     if value is None or pd.isna(value):
         return None
     if hasattr(value, "item"):
@@ -116,10 +117,12 @@ def number(value: Any) -> Optional[float | int]:
 
 def infer_trading_date(source_date: str, source_time: str) -> str:
     """
-    初版交易日推定：
-    21:00 及之后的夜盘归入下一自然日。
-    注意：尚未接入大商所节假日交易日历，结果需要验证。
-    source_date/source_time 必须已由调用方严格校验；此处不以本机日期兜底。
+    Initial trading date inference:
+    Night sessions at 21:00 and later are assigned to the next calendar day.
+
+    Note: Not yet connected to DCE trading calendar; results need verification.
+    source_date/source_time must be strictly validated by the caller;
+    this function does not fall back to the local date.
     """
     day = datetime.strptime(source_date, "%Y-%m-%d").date()
 
@@ -137,7 +140,7 @@ def infer_trading_date(source_date: str, source_time: str) -> str:
 
 
 def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
-    """校验历史日线的日期、数值和 OHLC 逻辑；失败时拒绝写入。"""
+    """Validate historical daily bars: dates, values, and OHLC logic; refuse writing on failure."""
     required = {
         "date", "open", "high", "low", "close",
         "volume", "hold", "settle",
@@ -151,7 +154,7 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
 
     data = df.copy()
 
-    # 日期必须有效且不能重复
+    # Dates must be valid and non-duplicate
     dates = pd.to_datetime(data["date"], errors="coerce")
     if dates.isna().any():
         bad_rows = data.index[dates.isna()].tolist()[:10]
@@ -163,7 +166,7 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
         examples = sorted(set(duplicated.tolist()))[:10]
         raise ValueError(f"历史日线存在重复日期：{examples}")
 
-    # OHLC 必须为有限正数；结算价允许源数据用 0 表示缺失
+    # Prices must be finite positive numbers; settle allows source data to use 0 for missing
     price_columns = ["open", "high", "low", "close"]
     for column in price_columns:
         values = pd.to_numeric(data[column], errors="coerce")
@@ -176,21 +179,21 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
         data[column] = values
 
     settle = pd.to_numeric(data["settle"], errors="coerce")
-    # NaN 表示缺失（源数据用 0 表示缺失，写入时转为 None），允许；
-    # 但非 NaN 的非有限值（inf）和负值不允许。
+    # NaN indicates missing (source data uses 0 for missing, written as None); allowed;
+    # but non-NaN non-finite values (inf) and negative values are not allowed.
     if (~settle.isna() & ~np.isfinite(settle)).any():
         raise ValueError("结算价存在非有限值")
     if (~settle.isna() & (settle < 0)).any():
         raise ValueError("结算价存在负值")
     data["settle"] = settle
 
-    # OHLC 关系必须成立
+    # OHLC relationship must hold
     invalid = (
         (data["high"] < data[["open", "close", "low"]].max(axis=1))
         | (data["low"] > data[["open", "close", "high"]].min(axis=1))
     )
 
-    # 仅对已经核实的两条历史源数据异常进行显式标记，不修改原始价格。
+    # Explicitly mark only the two verified historical source data anomalies, do not modify original prices.
     known_bad_dates = {"2011-01-03", "2020-08-06"}
     known_bad = normalized_dates.isin(known_bad_dates) & invalid
     unexpected_bad = invalid & ~known_bad
@@ -202,7 +205,7 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
     data["quality_status"] = "valid"
     data.loc[known_bad, "quality_status"] = "invalid_ohlc"
 
-    # 成交量和持仓量必须是非负有限数值
+    # Volume and open interest must be non-negative finite values
     for column in ["volume", "hold"]:
         values = pd.to_numeric(data[column], errors="coerce")
         if values.isna().any():
@@ -213,23 +216,24 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
             raise ValueError(f"字段 {column} 存在负值")
         data[column] = values
 
-    # 持仓量和成交量不允许缺失；通过后返回标准化副本
+    # Volume and open interest are not allowed to be missing; return standardized copy after processing
     data["date"] = normalized_dates
     return data
 
 def append_jsonl(records: list[dict], log_path: Path | None = None, key_fields: tuple[str, ...] = ("symbol", "datetime")) -> int:
-    """将记录去重追加写入 JSONL 文件（原子写入）。
+    """Append records to a JSONL file with deduplication (atomic write).
 
-    写入策略：读取现有内容 → 追加新记录 → 写入临时文件 → 原子替换原文件。
-    避免进程崩溃时留下半行损坏的 JSON。
+    Write strategy: read existing content -> append new records -> write to temp file ->
+    atomically replace the original file.
+    Avoid leaving half-written broken JSON when the process crashes.
 
-    参数:
-        records: 要写入的记录列表
-        log_path: 目标 JSONL 文件路径，默认使用 QUALITY_LOG
-        key_fields: 去重依据的字段名元组，默认 ("symbol", "datetime")
+    Parameters:
+        records: List of records to write
+        log_path: Target JSONL file path, defaults to QUALITY_LOG
+        key_fields: Tuple of field names used for deduplication, defaults to ("symbol", "datetime")
 
-    返回:
-        本次实际写入的条数。
+    Returns:
+        Number of records actually written.
     """
     if not records:
         return 0
@@ -250,7 +254,7 @@ def append_jsonl(records: list[dict], log_path: Path | None = None, key_fields: 
                     item = json.loads(line)
                     existing.add(tuple(item.get(k) for k in key_fields))
                 except json.JSONDecodeError:
-                    # 损坏行保留，不参与去重键判断
+                    # Damaged line kept, not used for deduplication key judgment
                     pass
 
     new_lines = []
@@ -283,12 +287,12 @@ def append_jsonl(records: list[dict], log_path: Path | None = None, key_fields: 
 
 def fetch_sina_spot(symbol: str = "V0") -> Optional[dict]:
     """
-    从新浪财经 API 拉取 PVC 连续合约（V0）实时行情原始字段。
+    Fetch raw field data for PVC continuous contract (V0) real-time quote from Sina Finance API.
 
-    直接调用 Sina HTTP 接口而非 akshare.futures_zh_spot（后者存在列数
-    不匹配导致的 ValueError 缺陷）。
+    Call Sina HTTP interface directly instead of akshare.futures_zh_spot
+    (the latter has a ValueError defect due to column count mismatch).
 
-    返回字段字典；失败时返回 None。
+    Returns a dictionary of fields; returns None on failure.
     """
     url = f"https://hq.sinajs.cn/list=nf_{symbol}"
     headers = {
@@ -337,7 +341,7 @@ def fetch_sina_spot(symbol: str = "V0") -> Optional[dict]:
 
 
 def _validate_source_date(value: Any) -> Optional[str]:
-    """严格校验源日期：必须为 YYYY-MM-DD 且为真实日历日期；否则返回 None。"""
+    """Strictly validate source date: must be YYYY-MM-DD and a valid calendar date; otherwise return None."""
     if value is None:
         return None
     s = str(value).strip()
@@ -351,7 +355,7 @@ def _validate_source_date(value: Any) -> Optional[str]:
 
 
 def _validate_source_time(value: Any) -> Optional[str]:
-    """严格校验源时间：必须为 HHMMSS 且时分秒合法；否则返回 None。"""
+    """Strictly validate source time: must be HHMMSS and valid hours/minutes/seconds; otherwise return None."""
     if value is None:
         return None
     s = str(value).strip()
@@ -367,15 +371,15 @@ def _validate_source_time(value: Any) -> Optional[str]:
 
 def collect_realtime_snapshot(symbol: str = "V0") -> Optional[dict]:
     """
-    获取 PVC 连续合约实时快照，独立于历史 CSV。
+    Get PVC continuous contract real-time snapshot, independent of historical CSV.
 
-    约定：
-    - source_date / source_time 来自数据源本身（新浪 API），不把采集时间
-      冒充行情时间。
-    - collected_at 记录实际采集时间。
-    - 数据源的成交量与持仓量原样保存。
-    - 保存到 output/{symbol}_realtime_snapshots.jsonl。
-    - 返回保存的记录；采集失败返回 None。
+    Convention:
+    - source_date / source_time come from the data source itself (Sina API), not confusing
+      collection time with quote time.
+    - collected_at records the actual collection time.
+    - Volume and open interest from the data source are saved as-is.
+    - Saved to output/{symbol}_realtime_snapshots.jsonl.
+    - Returns the saved record; returns None on collection failure.
     """
     spot = fetch_sina_spot(symbol=symbol)
     if spot is None:
@@ -441,12 +445,13 @@ def collect_realtime_snapshot(symbol: str = "V0") -> Optional[dict]:
 
 def records_to_csv(records: list[dict], csv_path: Path) -> int:
     """
-    将记录列表直接写入 UTF-8 BOM 编码的 CSV 文件。
-    列名为所有记录字段的并集，保留原字段名称及首次出现的顺序。
-    写入临时文件，成功后原子替换，避免留下半成品。
+    Write a list of records directly to a UTF-8 BOM encoded CSV file.
+    Column names are the union of all record fields, preserving original field names
+    and first occurrence order.
+    Write to a temp file, atomically replace after success, avoiding half-finished output.
     """
     if not records:
-        # 无记录时不修改现有文件，直接返回 0，避免意外清空旧数据
+        # No records: do not modify existing file, return 0 directly to avoid accidentally clearing old data
         if not csv_path.exists():
             return 0
         return 0
@@ -484,7 +489,7 @@ def records_to_csv(records: list[dict], csv_path: Path) -> int:
 
 
 def csv_to_records(csv_path: Path) -> list[dict]:
-    """从 CSV 文件读取记录列表。文件不存在时返回空列表。"""
+    """Read records from a CSV file. Return an empty list if the file does not exist."""
     if not csv_path.exists():
         return []
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
@@ -493,8 +498,8 @@ def csv_to_records(csv_path: Path) -> list[dict]:
 
 def update_daily_bars(df: pd.DataFrame, symbol: str = "V0") -> int:
     """
-    历史日线以 (symbol, trading_date) 为唯一键。
-    每次读取历史接口后进行合并、去重并整体写回 CSV。
+    Historical daily bars use (symbol, trading_date) as the unique key.
+    Merge, deduplicate after reading from the historical interface, and write back to CSV as a whole.
     """
     records_by_key = {}
 
@@ -575,9 +580,10 @@ def validate_minute_bars(df: pd.DataFrame) -> pd.DataFrame:
 
 def parse_market_datetime(value: Any, tz: ZoneInfo = TZ) -> pd.Timestamp:
     """
-    将行情分钟时间戳统一为带时区的 pandas Timestamp。
-    输入无时区则本地化为 tz；已带时区则转换到 tz，避免跨时区混比。
-    无法解析返回 pd.NaT。
+    Unify quote minute timestamps as timezone-aware pandas Timestamps.
+    Input without timezone is localized to tz; input with timezone is converted to tz,
+    avoiding cross-timezone confusion.
+    Returns pd.NaT if unparseable.
     """
     ts = pd.to_datetime(value, errors="coerce")
     if pd.isna(ts):
@@ -589,7 +595,6 @@ def parse_market_datetime(value: Any, tz: ZoneInfo = TZ) -> pd.Timestamp:
         ts = ts.tz_convert(tz)
     return ts
 
-
 def separate_future_timestamps(
     data: pd.DataFrame,
     symbol: str,
@@ -597,17 +602,17 @@ def separate_future_timestamps(
     log_path: Optional[Path] = None,
 ) -> pd.DataFrame:
     """
-    以带时区的采集时间 (collected_at) 为基准，识别行情时间晚于
-    采集时间加容差 (FUTURE_TIMESTAMP_TOLERANCE) 的记录。
+    Based on timezone-aware collection time (collected_at), identify records whose
+    quote time is later than collection time plus tolerance (FUTURE_TIMESTAMP_TOLERANCE).
 
-    行为：
-    - 未来时间记录标记 issue="future_timestamp"，不写入有效分钟线数据集；
-      其时间、品种、OHLC、成交量、持仓量及采集时间记录到质量日志
-      (output/minute_data_quality.jsonl)，同一条 (symbol, datetime) 记录
-      不重复写入。
-    - 时间戳本身不被修改（不把 09:01 改成 21:01 等）。
-    - 时间比较统一为 Asia/Shanghai 时区。
-    - 返回仅含正常记录的 DataFrame（按 datetime 排序、重置索引）。
+    Behavior:
+    - Future-time records are marked issue="future_timestamp", not written to the valid
+      minute bar dataset; their time, symbol, OHLC, volume, open interest, and collection
+      time are logged to the quality log (output/minute_data_quality.jsonl).
+      The same (symbol, datetime) record is not written repeatedly.
+    - The timestamp itself is not modified (e.g., not changing 09:01 to 21:01).
+    - Time comparison is unified in Asia/Shanghai timezone.
+    - Returns a DataFrame containing only normal records (sorted by datetime, index reset).
     """
     if data.empty:
         return data.copy()
@@ -619,7 +624,7 @@ def separate_future_timestamps(
     for _, row in data.iterrows():
         bar_dt = parse_market_datetime(row["datetime"])
         if pd.isna(bar_dt):
-            # 无法解析的时间戳不在本函数判断，保留以维持原有行为。
+            # Unparseable timestamps are not judged in this function, kept to maintain original behavior.
             keep_mask.append(True)
             continue
         if bar_dt > threshold:
@@ -650,17 +655,19 @@ def filter_future_anomalies(
     records: list[dict], log_path: Optional[Path] = None
 ) -> list[dict]:
     """
-    对已合并的数据集按记录自身的 collected_at 校验。
+    Validate the merged dataset by each record's own collected_at.
 
-    判定规则（统一 Asia/Shanghai 时区）：
+    Judgment rule (unified in Asia/Shanghai timezone):
         record.datetime > record.collected_at + FUTURE_TIMESTAMP_TOLERANCE
-    的记录视为未来时间戳异常，从最终数据集中移除，并记录到质控日志。
+    Records matching this are considered future-timestamp anomalies, removed from the
+    final dataset, and logged to the quality control log.
 
-    该步骤在合并历史数据之后执行，用于清理旧文件中因历史未受过滤而残留的
-    异常记录，避免旧文件异常被重新保留。
-    - 不修改异常记录的原始时间。
-    - 同一条 (symbol, datetime) 异常记录不重复写入日志。
-    - 缺少可用的时间对（datetime/collected_at）的记录原样保留。
+    This step runs after merging historical data, used to clean up anomaly records
+    remaining in old files that were not filtered historically, preventing old file
+    anomalies from being retained again.
+    - Do not modify the original time of anomaly records.
+    - The same (symbol, datetime) anomaly record is not written repeatedly to the log.
+    - Records missing available time pairs (datetime/collected_at) are kept as-is.
     """
     kept = []
     anomalies = []
@@ -715,7 +722,7 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
         timestamp = row["datetime"]
         key = (symbol, timestamp)
         if key in records:
-            # 旧记录保留原始 collected_at，只更新行情字段
+            # Old record keeps original collected_at, only update quote fields
             records[key].update({
                 "open": number(row["open"]),
                 "high": number(row["high"]),
@@ -748,42 +755,44 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
 
 
 def is_after_day_session_close() -> bool:
-    """白盘收盘后，可采集完整日线数据。
+    """After day session close, complete daily bars can be collected.
 
-    PVC 白盘交易时间（大商所）：09:00-15:00。
-    白盘收盘后（15:00），前一夜盘与今日日盘数据即齐备，
-    可采集当日交易日完整日线（夜盘归入下一交易日，不影响今日）。
-    周末休市时返回 False。
+    DCE day session trading time: 09:00-15:00.
+    After day session close (15:00), the previous night session and today's day session
+    data are ready, so complete daily bars for the current trading day can be collected
+    (night session is assigned to the next trading day, does not affect today).
+    Returns False on weekend closure.
     """
     now = datetime.now(TZ)
     weekday = now.weekday()  # 0=Mon … 5=Sat, 6=Sun
     hhmm = int(now.strftime("%H%M"))
 
-    if weekday >= 5:  # 周末休市
+    if weekday >= 5:  # Weekend closure
         return False
-    # 周一到周五：白盘 15:00 后即可采集当日完整日线
+    # Weekdays: complete daily bars can be collected after day session at 15:00
     return hhmm >= 1500
 
 
 def is_after_market_close() -> bool:
-    """判断当前北京时间是否已过 PVC 交易当日收盘。
+    """Determine whether the current Beijing time is past the PVC trading day close.
 
-    与 is_after_day_session_close() 保持一致：白盘 15:00 后即可采集。
-    不再区分 23:00 夜盘收盘，夜盘归入下一交易日，由 infer_trading_date
-    处理日期推定。
+    Consistent with is_after_day_session_close(): complete daily bars can be collected
+    after day session at 15:00.
+    No longer distinguish 23:00 night session close; night session is assigned to the
+    next trading day, handled by infer_trading_date for date inference.
     """
     return is_after_day_session_close()
 
 def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int]:
     """
-    获取并更新指定品种的日线数据。
+    Fetch and update daily bar data for the specified symbol.
 
-    参数:
-        symbol: 合约代码，如 "V0"、"V2701"
-        session_label: 日志标签，如 "白盘"、"完整"
+    Parameters:
+        symbol: Contract code, e.g., "V0", "V2701"
+        session_label: Log label, e.g., "day session", "complete"
 
-    返回:
-        更新条数，失败返回 None
+    Returns:
+        Number of updated records, returns None on failure.
     """
     daily_df = _retryable_call(ak.futures_zh_daily_sina, symbol=symbol)
     if daily_df is None or daily_df.empty:
@@ -848,7 +857,7 @@ if __name__ == "__main__":
         except Exception as exc:
             logger.error("日线 %s 更新失败（不影响其他流程）：%s", symbol, exc)
 
-    # 三个数据流相互独立，并行执行；每个品种的每个流程作为独立任务
+    # Three data streams are independent, execute in parallel; each symbol's each stream is an independent task
     tasks = []
     for sym in ("V0", "V2701"):
         tasks.append(("realtime", sym, _run_realtime_snapshot))
@@ -858,4 +867,4 @@ if __name__ == "__main__":
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         futures = [executor.submit(fn, sym) for _, sym, fn in tasks]
         for future in as_completed(futures):
-            future.result()  # 抛出任务内部可能的异常（已在各函数内 catch，此处仅确保完成）
+            future.result()  # Raise exceptions possibly thrown within tasks (already caught in each function, just confirm completion here)

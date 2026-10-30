@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""接口异常失败保护测试。
+"""Interface exception failure protection tests.
 
-验证：当分钟行情接口抛出异常 / 返回 None / 返回空 / 校验失败时，
-output/V2701_minute_bars.csv 以及
-output/minute_data_quality.jsonl 不能被清空、截断或意外覆盖。
+Verify: when the minute quote interface throws exceptions / returns None / returns empty /
+validation fails, output/V2701_minute_bars.csv and
+output/minute_data_quality.jsonl must not be emptied, truncated, or accidentally overwritten.
 
-这些测试使用**临时目录**模拟正式输出路径，所有快照比对在隔离环境下进行，
-绝不读写正式数据文件。
+These tests use **temporary directories** to simulate formal output paths; all snapshot
+comparisons are performed in an isolated environment, never reading or writing formal data files.
 """
 
 import csv
@@ -55,7 +55,7 @@ def _lines(p):
 
 
 def snapshot():
-    """返回 (sha, size, count) 三元组，便于前后比对。"""
+    """Return (sha, size, count) tuple for before/after comparison."""
     snap = {}
     minute_csv = m.get_minute_csv("V2701")
     for key, path in (("csv", minute_csv),
@@ -75,8 +75,8 @@ def _count_for(key, path):
 
 def run_main_minute_block():
     """
-    忠实复现 fetch_pvc.py __main__ 的分钟抓取—更新—导出流程。
-    接口调用、None/空判断、update_minute_bars 均为实物函数。
+    Faithfully reproduce the fetch_pvc.py __main__ minute fetch-update-export flow.
+    Interface calls, None/empty checks, and update_minute_bars are all real functions.
     """
     minute_df = m.ak.futures_zh_minute_sina(symbol="V2701", period="1")
     if minute_df is None or minute_df.empty:
@@ -123,20 +123,20 @@ class InterfaceFailureSafetyTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_interface_raises_propagates_and_files_intact(self):
-        """接口抛出异常 → 异常向上抛出，未写入任何文件。"""
+        """Interface throws exception → exception propagates upward, no file written."""
         with patch.object(m.ak, "futures_zh_minute_sina",
                           side_effect=ConnectionError("模拟网络异常")):
             with self.assertRaises(ConnectionError):
                 run_main_minute_block()
 
     def test_none_return_protects_files(self):
-        """接口返回 None → RuntimeError，文件不变。"""
+        """Interface returns None → RuntimeError, file unchanged."""
         with patch.object(m.ak, "futures_zh_minute_sina", return_value=None):
             with self.assertRaises(RuntimeError):
                 run_main_minute_block()
 
     def test_empty_return_protects_files(self):
-        """接口返回空 DataFrame → RuntimeError，文件不变。"""
+        """Interface returns empty DataFrame → RuntimeError, file unchanged."""
         with patch.object(m.ak, "futures_zh_minute_sina",
                           return_value=pd.DataFrame(
                               columns=["datetime", "open", "high", "low",
@@ -145,8 +145,8 @@ class InterfaceFailureSafetyTests(unittest.TestCase):
                 run_main_minute_block()
 
     def test_validation_failure_protects_files(self):
-        """update_minute_bars 内部校验失败 → 抛出，CSV 文件未读写。"""
-        bad_df = pd.DataFrame({"foo": [1, 2]})  # 缺少全部必字段
+        """update_minute_bars internal validation fails → raised, CSV file not read/written."""
+        bad_df = pd.DataFrame({"foo": [1, 2]})  # Missing all required fields
         with self.assertRaises(ValueError):
             m.update_minute_bars("V2701", bad_df)
 

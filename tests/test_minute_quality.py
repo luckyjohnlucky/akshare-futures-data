@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""分钟线未来时间戳质量处理的测试。
+"""Tests for minute bar future timestamp quality handling.
 
-覆盖：正常记录、未来时间记录、重复异常记录、空数据情况。
-使用 unittest（无需 pytest），不访问网络。
+Covers: normal records, future-time records, duplicate anomaly records, empty data.
+Uses unittest (no pytest needed), does not access the network.
 """
 
 import csv
@@ -14,7 +14,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# 确保能从项目根导入 fetch_pvc
+# Ensure fetch_pvc can be imported from the project root
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -23,7 +23,7 @@ import fetch_pvc as m  # noqa: E402
 
 
 def make_minute_df(rows):
-    """构造可通过 validate_minute_bars 的分钟 DataFrame。"""
+    """Construct a minute DataFrame that can pass validate_minute_bars."""
     cols = ["datetime", "open", "high", "low", "close", "volume", "hold"]
     return m.pd.DataFrame(rows, columns=cols)
 
@@ -33,7 +33,7 @@ class SeparateFutureTimestampsTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.log = os.path.join(self.tmp.name, "minute_data_quality.jsonl")
         self.symbol = "V2701"
-        # 采集时间 09:01:30，容差 1 分钟 → 阈值 09:02:30
+        # Collection time 09:01:30, tolerance 1 minute → threshold 09:02:30
         self.collected_at = datetime(2026, 1, 1, 9, 1, 30, tzinfo=m.TZ)
 
     def tearDown(self):
@@ -52,7 +52,7 @@ class SeparateFutureTimestampsTests(unittest.TestCase):
         ]
 
     def _normal_rows(self):
-        """全部落在采集时间(+容差) 之前，无未来记录。"""
+        """All records fall before collection time (+ tolerance), no future records."""
         return [
             {"datetime": "2026-01-01 09:00:00", "open": 1.0, "high": 1.1,
              "low": 0.9, "close": 1.0, "volume": 10, "hold": 5},
@@ -63,7 +63,7 @@ class SeparateFutureTimestampsTests(unittest.TestCase):
         ]
 
     def test_normal_records_kept(self):
-        """行情时间不晚于采集时间(+容差)的记录全部保留，不写质控日志。"""
+        """Records whose quote time is not later than collection time (+ tolerance) are all kept, no quality log written."""
         df = make_minute_df(self._normal_rows())
         valid = m.separate_future_timestamps(df, self.symbol, self.collected_at,
                                              log_path=self.log)
@@ -76,7 +76,7 @@ class SeparateFutureTimestampsTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.log))
 
     def test_future_record_excluded_and_logged(self):
-        """未来时间记录被剔除并写入质控日志，含 issue 标记。"""
+        """Future-time records are excluded and logged to quality log, with issue marker."""
         df = make_minute_df(self._rows())
         valid = m.separate_future_timestamps(df, self.symbol, self.collected_at,
                                              log_path=self.log)
@@ -91,13 +91,13 @@ class SeparateFutureTimestampsTests(unittest.TestCase):
         self.assertEqual(rec["symbol"], self.symbol)
         self.assertEqual(rec["datetime"], "2026-01-01 09:05:00")
         self.assertEqual(rec["issue"], "future_timestamp")
-        # 保留采集时间与行情时间的区别
+        # Keep distinction between collection time and quote time
         self.assertEqual(rec["collected_at"], self.collected_at.isoformat())
         for field in ["open", "high", "low", "close", "volume", "open_interest"]:
             self.assertIn(field, rec)
 
     def test_timestamp_not_modified(self):
-        """过滤不得修改时间戳（不把 09:01 改成 21:01 等）。"""
+        """Filtering must not modify timestamps (e.g., not changing 09:01 to 21:01)."""
         df = make_minute_df(self._rows())
         valid = m.separate_future_timestamps(df, self.symbol, self.collected_at,
                                              log_path=self.log)
@@ -105,11 +105,11 @@ class SeparateFutureTimestampsTests(unittest.TestCase):
             self.assertEqual(raw["datetime"], kept["datetime"])
 
     def test_duplicate_anomaly_not_rewritten(self):
-        """同一条 (symbol, datetime) 异常记录不重复写入。"""
+        """The same (symbol, datetime) anomaly record is not written repeatedly."""
         df = make_minute_df(self._rows())
         m.separate_future_timestamps(df, self.symbol, self.collected_at,
                                      log_path=self.log)
-        # 再次运行，09:05 仍为未来，应被跳过写入
+        # Run again, 09:05 is still future, should be skipped for writing
         m.separate_future_timestamps(df, self.symbol, self.collected_at,
                                      log_path=self.log)
         with open(self.log, encoding="utf-8") as f:
@@ -117,7 +117,7 @@ class SeparateFutureTimestampsTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
 
     def test_empty_data(self):
-        """空数据不崩溃，原样返回空，未写质控日志。"""
+        """Empty data does not crash, returns empty as-is, no quality log written."""
         empty = make_minute_df([])
         valid = m.separate_future_timestamps(empty, self.symbol,
                                              self.collected_at, log_path=self.log)
@@ -131,6 +131,75 @@ class AppendQualityRecordsTests(unittest.TestCase):
             log = os.path.join(d, "q.jsonl")
             self.assertEqual(m.append_jsonl([], log_path=log), 0)
             self.assertFalse(os.path.exists(log))
+
+    def test_atomic_write_on_success(self):
+        """Normal append write: existing records kept, new records appended, temp file cleaned up."""
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "q.jsonl")
+            # Pre-write one record
+            with open(log, "w", encoding="utf-8") as f:
+                f.write('{"symbol":"V0","datetime":"2026-10-28 09:00:00"}\n')
+
+            new_records = [
+                {"symbol": "V0", "datetime": "2026-10-28 09:01:00"},
+                {"symbol": "V0", "datetime": "2026-10-28 09:02:00"},
+            ]
+            written = m.append_jsonl(new_records, log_path=log)
+            self.assertEqual(written, 2)
+
+            # Temp file should not remain
+            tmp = os.path.join(d, "q.jsonl.tmp")
+            self.assertFalse(os.path.exists(tmp))
+
+            # Original file should contain all records
+            with open(log, encoding="utf-8") as f:
+                lines = [json.loads(l) for l in f if l.strip()]
+            self.assertEqual(len(lines), 3)
+            self.assertEqual(lines[0]["datetime"], "2026-10-28 09:00:00")
+            self.assertEqual(lines[1]["datetime"], "2026-10-28 09:01:00")
+            self.assertEqual(lines[2]["datetime"], "2026-10-28 09:02:00")
+
+    def test_atomic_write_on_failure_preserves_original(self):
+        """On write failure: original file remains unchanged, temp file cleaned up."""
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "q.jsonl")
+            # Pre-write one record
+            original = '{"symbol":"V0","datetime":"2026-10-28 09:00:00"}\n'
+            with open(log, "w", encoding="utf-8") as f:
+                f.write(original)
+
+            # Set target path to a directory to cause temp file write failure
+            os.remove(log)
+            os.mkdir(log)
+
+            try:
+                m.append_jsonl(
+                    [{"symbol": "V0", "datetime": "2026-10-28 09:01:00"}],
+                    log_path=log,
+                )
+                self.fail("Exception should be raised")
+            except Exception:
+                pass
+
+            # Original file should not exist (because it was changed to a directory), but key is temp file cleaned up
+            tmp = os.path.join(d, "q.jsonl.tmp")
+            self.assertFalse(os.path.exists(tmp),
+                             "写入失败时临时文件应被清理")
+
+    def test_atomic_write_duplicate_not_rewritten(self):
+        """Records with duplicate keys should not be written repeatedly."""
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "q.jsonl")
+            existing = {"symbol": "V0", "datetime": "2026-10-28 09:00:00"}
+            with open(log, "w", encoding="utf-8") as f:
+                f.write(json.dumps(existing, ensure_ascii=False) + "\n")
+
+            written = m.append_jsonl([existing.copy()], log_path=log)
+            self.assertEqual(written, 0)
+
+            with open(log, encoding="utf-8") as f:
+                lines = [json.loads(l) for l in f if l.strip()]
+            self.assertEqual(len(lines), 1)
 
 
 class FilterFutureAnomaliesTests(unittest.TestCase):
@@ -151,7 +220,7 @@ class FilterFutureAnomaliesTests(unittest.TestCase):
         }
 
     def test_legitimate_record_kept(self):
-        """bar <= collected_at 的记录原样保留。"""
+        """Records where bar <= collected_at are kept as-is."""
         recs = [self._rec("V2701", "2026-10-28 09:00:00",
                           "2026-10-28T09:05:00+08:00")]
         kept = m.filter_future_anomalies(recs, log_path=self.log)
@@ -159,7 +228,7 @@ class FilterFutureAnomaliesTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.log))
 
     def test_old_anomaly_removed_and_logged(self):
-        """bar > collected_at + 容差 的旧记录被移除并写入质控日志。"""
+        """Old records where bar > collected_at + tolerance are removed and logged to quality log."""
         recs = [self._rec("V2701", "2026-10-28 09:01:00",
                           "2026-10-27 01:44:55+08:00")]
         kept = m.filter_future_anomalies(recs, log_path=self.log)
@@ -173,7 +242,7 @@ class FilterFutureAnomaliesTests(unittest.TestCase):
         self.assertEqual(lines[0]["collected_at"], "2026-10-27 01:44:55+08:00")
 
     def test_duplicate_anomaly_not_relogged(self):
-        """同一条异常记录多次过滤不重复写入日志。"""
+        """The same anomaly record filtered multiple times is not logged repeatedly."""
         rec = self._rec("V2701", "2026-10-28 09:01:00",
                         "2026-10-27 01:44:55+08:00")
         m.filter_future_anomalies([rec], log_path=self.log)
@@ -183,14 +252,14 @@ class FilterFutureAnomaliesTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
 
     def test_missing_collected_at_kept(self):
-        """缺少 collected_at 的记录原样保留（不擅自删除）。"""
+        """Records missing collected_at are kept as-is (not arbitrarily deleted)."""
         recs = [self._rec("V2701", "2026-10-28 09:01:00", None)]
         kept = m.filter_future_anomalies(recs, log_path=self.log)
         self.assertEqual(len(kept), 1)
 
 
 class UpdateMinuteBarsIntegrationTests(unittest.TestCase):
-    """端到端：update_minute_bars 不应把未来记录写入 CSV。"""
+    """End-to-end: update_minute_bars should not write future records to CSV."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -211,7 +280,7 @@ class UpdateMinuteBarsIntegrationTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_future_bar_excluded_from_json(self):
-        """采集后的未来分钟不进入数据集，但被记录到质控日志。"""
+        """Future minutes after collection do not enter the dataset, but are logged to quality log."""
         now = datetime.now(m.TZ)
         past = now - timedelta(minutes=10)
         future = now + timedelta(minutes=5)
