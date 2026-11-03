@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: pvc-collect
+  group: pvc-collect-nine
   cancel-in-progress: false
 
 jobs:
@@ -40,31 +40,37 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      - name: Check target branch
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "branch" ] || [ "${GITHUB_REF_NAME}" != "release/pvc-nine-contracts" ]; then
+            echo "ERROR: This workflow must run on release/pvc-nine-contracts branch. Current: ${GITHUB_REF_NAME} (${GITHUB_REF_TYPE})"
+            exit 1
+          fi
       - name: Fetch latest data (minute + daily, independent)
         run: python fetch_pvc.py
 
       - name: Commit all data changes
         run: |
-          git add output/V0_minute_bars.csv output/V0_daily_bars.csv \
-                 output/TA0_minute_bars.csv output/TA0_daily_bars.csv \
-                 output/MA0_minute_bars.csv output/MA0_daily_bars.csv \
-                 output/PP0_minute_bars.csv output/PP0_daily_bars.csv \
-                 output/L0_minute_bars.csv output/L0_daily_bars.csv \
-                 output/SA0_minute_bars.csv output/SA0_daily_bars.csv \
-                 output/FG0_minute_bars.csv output/FG0_daily_bars.csv \
-                 output/RB0_minute_bars.csv output/RB0_daily_bars.csv \
-                 output/HC0_minute_bars.csv output/HC0_daily_bars.csv
-          if git diff --quiet --cached; then
-            echo "No data changes; nothing to commit."
+          # Build list of existing CSV files to add
+          set -e
+          FILES=""
+          for symbol in V0 TA0 MA0 PP0 L0 SA0 FG0 RB0 HC0; do
+            if [ -f "output/${symbol}_minute_bars.csv" ]; then
+              FILES+=" output/${symbol}_minute_bars.csv"
+            fi
+            if [ -f "output/${symbol}_daily_bars.csv" ]; then
+              FILES+=" output/${symbol}_daily_bars.csv"
+            fi
+          done
+          
+          if [ -z "$FILES" ]; then
+            echo "No CSV files found to add."
           else
-            git commit -m "chore: auto-collect commodity futures data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            for i in 1 2 3; do
-              git fetch origin
-              git rebase origin/main
-              if git push; then
-                break
-              fi
-              echo "Push failed, retrying ($i/3)..."
-              sleep 5
-            done
+            git add $FILES
+            if git diff --quiet --cached; then
+              echo "No data changes; nothing to commit."
+            else
+              git commit -m "chore: auto-collect commodity futures data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+              git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
+            fi
           fi

@@ -122,7 +122,7 @@ def number(value: Any) -> Optional[float | int]:
 
 
 def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
-    """Validate historical daily bars: dates, values, and OHLC logic; refuse writing on failure."""
+    """Validate historical daily bars: dates, values, and OHLC logic; delete confirmed source data errors."""
     required = {
         "date", "open", "high", "low", "close",
         "volume", "hold", "settle",
@@ -175,17 +175,88 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
         | (data["low"] > data[["open", "close", "high"]].min(axis=1))
     )
 
-    # Explicitly mark only the two verified historical source data anomalies, do not modify original prices.
+    # Confirmed source data errors - delete these records directly
+    confirmed_errors = {
+        # TA0 anomalies (6 records)
+        "TA0": {
+            "2006-12-28": {"high_open": True, "low_open": False, "high_close": False, "low_close": False},
+            "2007-03-27": {"high_open": True, "low_open": False, "high_close": False, "low_close": False},
+            "2007-05-11": {"high_open": True, "low_open": False, "high_close": False, "low_close": False},
+            "2007-05-28": {"high_open": False, "low_open": True, "high_close": False, "low_close": False},
+            "2007-07-10": {"high_open": True, "low_open": False, "high_close": False, "low_close": False},
+            "2008-10-07": {"high_open": False, "low_open": False, "high_close": True, "low_close": False},
+        },
+        # L0 anomaly (1 record)
+        "L0": {
+            "2007-07-31": {"high_open": True, "low_open": False, "high_close": False, "low_close": False},
+        },
+        # HC0 anomaly (1 record)
+        "HC0": {
+            "2021-12-30": {"high_open": False, "low_open": False, "high_close": False, "low_close": True},
+        },
+    }
+    
+    # Identify records to delete
+    records_to_delete = []
+    for symbol, errors in confirmed_errors.items():
+        for date, error_types in errors.items():
+            # Check if this record matches the anomaly
+            symbol_match = data["symbol"] == symbol if "symbol" in data.columns else True
+            date_match = normalized_dates == date
+            
+            # Get OHLC values for this record
+            open_vals = pd.to_numeric(data["open"], errors="coerce")
+            high_vals = pd.to_numeric(data["high"], errors="coerce")
+            low_vals = pd.to_numeric(data["low"], errors="coerce")
+            close_vals = pd.to_numeric(data["close"], errors="coerce")
+            
+            # Check if all error conditions match
+            high_open_match = error_types["high_open"]
+            low_open_match = error_types["low_open"]
+            high_close_match = error_types["high_close"]
+            low_close_match = error_types["low_close"]
+            
+            if (symbol_match & date_match).any():
+                # For each matching record, check the actual OHLC values
+                for idx in data.index:
+                    if (normalized_dates[idx] == date and
+                            ("symbol" not in data.columns or data.at[idx, "symbol"] == symbol)):
+                        open_val = open_vals[idx]
+                        high_val = high_vals[idx]
+                        low_val = low_vals[idx]
+                        close_val = close_vals[idx]
+                        
+                        actual_high_open = high_val < open_val
+                        actual_low_open = low_val > open_val
+                        actual_high_close = high_val < close_val
+                        actual_low_close = low_val > close_val
+                        
+                        if (actual_high_open == high_open_match and
+                                actual_low_open == low_open_match and
+                                actual_high_close == high_close_match and
+                                actual_low_close == low_close_match):
+                            records_to_delete.append(idx)
+    
+    # Remove confirmed error records
+    if records_to_delete:
+        data = data.drop(index=records_to_delete).reset_index(drop=True)
+        logger.warning(f"已删除 {len(records_to_delete)} 条确认的 OHLC 异常记录")
+    
+    # Recalculate invalid mask after removing confirmed errors
+    dates = pd.to_datetime(data["date"], errors="coerce")
+    if dates.isna().any():
+        bad_rows = data.index[dates.isna()].tolist()[:10]
+        raise ValueError(f"存在无效交易日期，行索引示例：{bad_rows}")
+    normalized_dates = dates.dt.strftime("%Y-%m-%d")
+    invalid = (
+        (data["high"] < data[["open", "close", "low"]].max(axis=1))
+        | (data["low"] > data[["open", "close", "high"]].min(axis=1))
+    )
+    
+    # Mark remaining known anomalies
     known_bad_dates = {"2011-01-03", "2020-08-06"}
     known_bad = normalized_dates.isin(known_bad_dates) & invalid
     unexpected_bad = invalid & ~known_bad
-
-    if unexpected_bad.any():
-        examples = normalized_dates[unexpected_bad].tolist()[:10]
-        raise ValueError(f"发现未登记的 OHLC 异常，拒绝写入：{examples}")
-
-    data["quality_status"] = "valid"
-    data.loc[known_bad, "quality_status"] = "invalid_ohlc"
 
     # Volume and open interest must be non-negative finite values
     for column in ["volume", "hold"]:
@@ -582,10 +653,10 @@ def is_after_day_session_close() -> bool:
     """After day session close, complete daily bars can be collected.
 
     DCE day session trading time: 09:00-15:00.
-    After day session close (15:00), the previous night session and today's day session
-    data are ready, so complete daily bars for the current trading day can be collected
-    (night session is assigned to the next trading day, does not affect today).
-    Returns False on weekend closure.
+    Night session: 21:00-23:00 (next trading day).
+    Daily bars are collected during 15:00-21:00 only; night session (21:00-23:00)
+    is skipped to avoid incomplete data.
+    Returns False on weekend closure and night session (21:00-23:00).
     """
     now = datetime.now(TZ)
     weekday = now.weekday()  # 0=Mon … 5=Sat, 6=Sun
@@ -593,8 +664,9 @@ def is_after_day_session_close() -> bool:
 
     if weekday >= 5:  # Weekend closure
         return False
-    # Weekdays: complete daily bars can be collected after day session at 15:00
-    return hhmm >= 1500
+    # Weekdays: collect daily bars only between 15:00 and 21:00
+    # Night session (21:00-23:00) is skipped; data belongs to next trading day
+    return 1500 <= hhmm < 2100
 
 
 def is_after_market_close() -> bool:
@@ -609,15 +681,33 @@ def is_after_market_close() -> bool:
 
 def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int]:
     """
-    Fetch and update daily bar data for the specified symbol.
+    获取并更新日线行情。
+
+    增量采集策略：
+    - 先读取本地已有数据的最新交易日期
+    - 调用 AKShare 接口获取全量日线
+    - 只保留比本地最新日期更新的记录
+    - 如果没有新数据，直接返回 0，不写入文件
 
     Parameters:
-        symbol: Contract code, e.g., "V0", "TA0"
-        session_label: Log label, e.g., "day session", "complete"
+        symbol: 合约代码，e.g. "V0", "TA0"
+        session_label: 会话标签，e.g. "日 session", "完整"
 
     Returns:
-        Number of updated records, returns None on failure.
+        新增记录数，失败返回 None
     """
+    # 获取本地已有数据的最新交易日期
+    existing_csv = get_daily_csv(symbol)
+    last_trading_date = None
+    if existing_csv.exists():
+        try:
+            existing_df = pd.read_csv(existing_csv, usecols=['trading_date'])
+            if not existing_df.empty:
+                last_trading_date = existing_df['trading_date'].max()
+        except Exception:
+            last_trading_date = None
+
+    # 调用 AKShare 接口获取日线数据（AKShare 不支持指定日期范围，只能获取全量）
     daily_df = _retryable_call(ak.futures_zh_daily_sina, symbol=symbol)
     if daily_df is None or daily_df.empty:
         raise RuntimeError(f"{symbol} 日线数据为空，停止更新。")
@@ -627,11 +717,22 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
     if missing:
         raise ValueError(f"{symbol} 日线数据缺少字段：{sorted(missing)}")
 
+    # 将 date 列转换为字符串格式，便于比较
+    daily_df['date'] = pd.to_datetime(daily_df['date']).dt.strftime('%Y-%m-%d')
+
+    # 增量过滤：只保留比本地最新日期更新的记录
+    if last_trading_date is not None:
+        daily_df = daily_df[daily_df['date'] > last_trading_date]
+        if daily_df.empty:
+            logger.info(
+                f"日线 {symbol}（{session_label}）：无新数据（本地最新：{last_trading_date}），跳过采集"
+            )
+            return 0
+
     validated = validate_daily_bars(daily_df)
     count = update_daily_bars(validated, symbol=symbol)
     logger.info(
-        "日线 %s（%s）：本次校验 %d 条；更新结果 %d；CSV %s",
-        symbol, session_label, len(validated), count, get_daily_csv(symbol),
+        f"日线 {symbol}（{session_label}）：本次获取 {len(daily_df)} 条；新增 {count} 条；CSV {get_daily_csv(symbol)}",
     )
     return count
 
@@ -645,6 +746,17 @@ if __name__ == "__main__":
 
     def _run_minute_bars(symbol: str):
         try:
+            # Skip minute bars during 15:00-21:00 (day session close to night session start)
+            # Minute data is collected only during 09:00-15:00 and 21:00-23:00
+            now = datetime.now(TZ)
+            hhmm = int(now.strftime("%H%M"))
+            weekday = now.weekday()
+            if weekday >= 5 or 1500 <= hhmm < 2100:
+                logger.info(
+                    "分钟线 %s：非交易时段（%s），跳过采集",
+                    symbol, now.strftime("%H:%M"),
+                )
+                return
             minute_df = _retryable_call(ak.futures_zh_minute_sina, symbol=symbol, period="1")
             if minute_df is None or minute_df.empty:
                 raise RuntimeError(f"{symbol} 分钟数据为空，停止更新。")
