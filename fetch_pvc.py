@@ -76,11 +76,12 @@ SYMBOL_NAME_MAP = {
     "FG0": "玻璃连续",
     "RB0": "螺纹钢连续",
     "HC0": "热卷连续",
+    "H11061": "中证商品期货指数",
 }
 
-# 需主动采集的合约列表（九个商品期货主力连续）
+# 需主动采集的合约列表（九个商品期货主力连续 + 1个指数）
 # 只有列在此列表中的合约才会被主循环提交采集任务
-ACTIVE_CONTRACTS = ["V0", "TA0", "MA0", "PP0", "L0", "SA0", "FG0", "RB0", "HC0"]
+ACTIVE_CONTRACTS = ["V0", "TA0", "MA0", "PP0", "L0", "SA0", "FG0", "RB0", "HC0", "H11061"]
 
 
 def get_daily_csv(symbol: str) -> Path:
@@ -690,7 +691,7 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
     - 如果没有新数据，直接返回 0，不写入文件
 
     Parameters:
-        symbol: 合约代码，e.g. "V0", "TA0"
+        symbol: 合约代码，e.g. "V0", "TA0", "H11061"（中证商品期货指数）
         session_label: 会话标签，e.g. "日 session", "完整"
 
     Returns:
@@ -708,14 +709,37 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
             last_trading_date = None
 
     # 调用 AKShare 接口获取日线数据（AKShare 不支持指定日期范围，只能获取全量）
-    daily_df = _retryable_call(ak.futures_zh_daily_sina, symbol=symbol)
-    if daily_df is None or daily_df.empty:
-        raise RuntimeError(f"{symbol} 日线数据为空，停止更新。")
+    is_index = symbol in {"H11061", "H30009"}  # 具体合约代码 vs 指数代码
+    if is_index:
+        # 指数使用 futures_index_ccidx 接口，固定使用 '中证商品期货指数' 作为 symbol
+        daily_df = _retryable_call(ak.futures_index_ccidx, symbol='中证商品期货指数')
+        if daily_df is None or daily_df.empty:
+            raise RuntimeError(f"{symbol} 指数数据为空，停止更新。")
+        # 指数数据字段映射：AKShare 返回的字段名 -> 标准字段名
+        # 注意：futures_index_ccidx 返回的列名是中英文混合
+        column_map = {
+            '日期': 'date',
+            'openingPrice': 'open',
+            'highPrice': 'high',
+            'lowPrice': 'low',
+            '收盘点位': 'close',
+            '结算点位': 'settle',
+        }
+        # 只保留需要的列并重命名
+        available_cols = [col for col in daily_df.columns if col in column_map]
+        daily_df = daily_df[available_cols].rename(columns=column_map)
+        # 指数数据没有成交量和持仓量，设为 0
+        daily_df['volume'] = 0
+        daily_df['hold'] = 0
+    else:
+        daily_df = _retryable_call(ak.futures_zh_daily_sina, symbol=symbol)
+        if daily_df is None or daily_df.empty:
+            raise RuntimeError(f"{symbol} 日线数据为空，停止更新。")
 
-    required = {"date", "open", "high", "low", "close", "volume", "hold", "settle"}
-    missing = required - set(daily_df.columns)
-    if missing:
-        raise ValueError(f"{symbol} 日线数据缺少字段：{sorted(missing)}")
+        required = {"date", "open", "high", "low", "close", "volume", "hold", "settle"}
+        missing = required - set(daily_df.columns)
+        if missing:
+            raise ValueError(f"{symbol} 日线数据缺少字段：{sorted(missing)}")
 
     # 将 date 列转换为字符串格式，便于比较
     daily_df['date'] = pd.to_datetime(daily_df['date']).dt.strftime('%Y-%m-%d')
@@ -732,7 +756,7 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
     validated = validate_daily_bars(daily_df)
     count = update_daily_bars(validated, symbol=symbol)
     logger.info(
-        f"日线 {symbol}（{session_label}）：本次获取 {len(daily_df)} 条；新增 {count} 条；CSV {get_daily_csv(symbol)}",
+        f"日线 {symbol}（{session_label}）：本次获取 {len(daily_df)} 条；更新结果 {count} 条；CSV {get_daily_csv(symbol)}",
     )
     return count
 
@@ -812,7 +836,9 @@ if __name__ == "__main__":
     # Two data streams are independent, execute in parallel; each symbol's each stream is an independent task
     tasks = []
     for sym in ACTIVE_CONTRACTS:
-        tasks.append(("minute", sym, _run_minute_bars))
+        # 商品期货支持分钟线，跳过指数合约 H11061
+        if sym != "H11061":
+            tasks.append(("minute", sym, _run_minute_bars))
         tasks.append(("daily", sym, _run_daily_bars))
 
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:

@@ -74,6 +74,7 @@ Parallel execution safety: different symbols operate on different files, no race
 | `output/RB0_minute_bars.csv` | Rebar minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
 | `output/HC0_daily_bars.csv` | Hot Rolled Coil daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
 | `output/HC0_minute_bars.csv` | Hot Rolled Coil minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/H11061_daily_bars.csv` | 中证商品期货指数 daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. Volume and open interest are 0 (index has no volume/open interest data). |
 | `output/minute_data_quality.jsonl` | Minute records excluded due to anomalies (e.g., `future_timestamp`) (global). |
 
 ## Quality Filtering Rules

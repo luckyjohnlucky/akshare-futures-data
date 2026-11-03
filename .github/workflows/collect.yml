@@ -42,10 +42,11 @@ jobs:
 
       - name: Check target branch
         run: |
-          if [ "${GITHUB_REF_TYPE}" != "branch" ] || [ "${GITHUB_REF_NAME}" != "release/pvc-nine-contracts" ]; then
-            echo "ERROR: This workflow must run on release/pvc-nine-contracts branch. Current: ${GITHUB_REF_NAME} (${GITHUB_REF_TYPE})"
+          if [ "${GITHUB_REF_TYPE}" != "branch" ]; then
+            echo "ERROR: This workflow must run on git branches. Current: ${GITHUB_REF_NAME} (${GITHUB_REF_TYPE})"
             exit 1
           fi
+          echo "Running workflow on branch: ${GITHUB_REF_NAME}"
       - name: Fetch latest data (minute + daily, independent)
         run: python fetch_pvc.py
 
@@ -54,7 +55,7 @@ jobs:
           # Build list of existing CSV files to add
           set -e
           FILES=""
-          for symbol in V0 TA0 MA0 PP0 L0 SA0 FG0 RB0 HC0; do
+          for symbol in V0 TA0 MA0 PP0 L0 SA0 FG0 RB0 HC0 H11061; do
             if [ -f "output/${symbol}_minute_bars.csv" ]; then
               FILES+=" output/${symbol}_minute_bars.csv"
             fi
