@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: pvc-collect
+  group: pvc-collect-nine
   cancel-in-progress: false
 
 jobs:
