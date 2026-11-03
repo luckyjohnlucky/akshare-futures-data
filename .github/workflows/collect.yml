@@ -51,18 +51,26 @@ jobs:
 
       - name: Commit all data changes
         run: |
-          git add output/V0_minute_bars.csv output/V0_daily_bars.csv \
-                 output/TA0_minute_bars.csv output/TA0_daily_bars.csv \
-                 output/MA0_minute_bars.csv output/MA0_daily_bars.csv \
-                 output/PP0_minute_bars.csv output/PP0_daily_bars.csv \
-                 output/L0_minute_bars.csv output/L0_daily_bars.csv \
-                 output/SA0_minute_bars.csv output/SA0_daily_bars.csv \
-                 output/FG0_minute_bars.csv output/FG0_daily_bars.csv \
-                 output/RB0_minute_bars.csv output/RB0_daily_bars.csv \
-                 output/HC0_minute_bars.csv output/HC0_daily_bars.csv
-          if git diff --quiet --cached; then
-            echo "No data changes; nothing to commit."
+          # Build list of existing CSV files to add
+          set -e
+          FILES=""
+          for symbol in V0 TA0 MA0 PP0 L0 SA0 FG0 RB0 HC0; do
+            if [ -f "output/${symbol}_minute_bars.csv" ]; then
+              FILES+=" output/${symbol}_minute_bars.csv"
+            fi
+            if [ -f "output/${symbol}_daily_bars.csv" ]; then
+              FILES+=" output/${symbol}_daily_bars.csv"
+            fi
+          done
+          
+          if [ -z "$FILES" ]; then
+            echo "No CSV files found to add."
           else
-            git commit -m "chore: auto-collect commodity futures data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
+            git add $FILES
+            if git diff --quiet --cached; then
+              echo "No data changes; nothing to commit."
+            else
+              git commit -m "chore: auto-collect commodity futures data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+              git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
+            fi
           fi
