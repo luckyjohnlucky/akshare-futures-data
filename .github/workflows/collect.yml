@@ -40,6 +40,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      - name: Check target branch
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "branch" ] || [ "${GITHUB_REF_NAME}" != "release/pvc-nine-contracts" ]; then
+            echo "ERROR: This workflow must run on release/pvc-nine-contracts branch. Current: ${GITHUB_REF_NAME} (${GITHUB_REF_TYPE})"
+            exit 1
+          fi
       - name: Fetch latest data (minute + daily, independent)
         run: python fetch_pvc.py
 
@@ -58,13 +64,5 @@ jobs:
             echo "No data changes; nothing to commit."
           else
             git commit -m "chore: auto-collect commodity futures data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            for i in 1 2 3; do
-              git fetch origin
-              git rebase origin/main
-              if git push; then
-                break
-              fi
-              echo "Push failed, retrying ($i/3)..."
-              sleep 5
-            done
+            git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
           fi
