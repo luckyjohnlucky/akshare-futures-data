@@ -32,7 +32,7 @@ class SeparateFutureTimestampsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.log = os.path.join(self.tmp.name, "minute_data_quality.jsonl")
-        self.symbol = "V2701"
+        self.symbol = "V0"
         # Collection time 09:01:30, tolerance 1 minute → threshold 09:02:30
         self.collected_at = datetime(2026, 1, 1, 9, 1, 30, tzinfo=m.TZ)
 
@@ -221,7 +221,7 @@ class FilterFutureAnomaliesTests(unittest.TestCase):
 
     def test_legitimate_record_kept(self):
         """Records where bar <= collected_at are kept as-is."""
-        recs = [self._rec("V2701", "2026-10-28 09:00:00",
+        recs = [self._rec("V0", "2026-10-28 09:00:00",
                           "2026-10-28T09:05:00+08:00")]
         kept = m.filter_future_anomalies(recs, log_path=self.log)
         self.assertEqual(len(kept), 1)
@@ -229,7 +229,7 @@ class FilterFutureAnomaliesTests(unittest.TestCase):
 
     def test_old_anomaly_removed_and_logged(self):
         """Old records where bar > collected_at + tolerance are removed and logged to quality log."""
-        recs = [self._rec("V2701", "2026-10-28 09:01:00",
+        recs = [self._rec("V0", "2026-10-28 09:01:00",
                           "2026-10-27 01:44:55+08:00")]
         kept = m.filter_future_anomalies(recs, log_path=self.log)
         self.assertEqual(len(kept), 0)
@@ -237,13 +237,13 @@ class FilterFutureAnomaliesTests(unittest.TestCase):
             lines = [json.loads(l) for l in f if l.strip()]
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0]["issue"], "future_timestamp")
-        self.assertEqual(lines[0]["symbol"], "V2701")
+        self.assertEqual(lines[0]["symbol"], "V0")
         self.assertEqual(lines[0]["datetime"], "2026-10-28 09:01:00")
         self.assertEqual(lines[0]["collected_at"], "2026-10-27 01:44:55+08:00")
 
     def test_duplicate_anomaly_not_relogged(self):
         """The same anomaly record filtered multiple times is not logged repeatedly."""
-        rec = self._rec("V2701", "2026-10-28 09:01:00",
+        rec = self._rec("V0", "2026-10-28 09:01:00",
                         "2026-10-27 01:44:55+08:00")
         m.filter_future_anomalies([rec], log_path=self.log)
         m.filter_future_anomalies([rec], log_path=self.log)
@@ -253,7 +253,7 @@ class FilterFutureAnomaliesTests(unittest.TestCase):
 
     def test_missing_collected_at_kept(self):
         """Records missing collected_at are kept as-is (not arbitrarily deleted)."""
-        recs = [self._rec("V2701", "2026-10-28 09:01:00", None)]
+        recs = [self._rec("V0", "2026-10-28 09:01:00", None)]
         kept = m.filter_future_anomalies(recs, log_path=self.log)
         self.assertEqual(len(kept), 1)
 
@@ -265,7 +265,7 @@ class UpdateMinuteBarsIntegrationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self._orig = {
-            "MINUTE_BARS_CSV_V2701": m.get_minute_csv("V2701"),
+            "MINUTE_BARS_CSV_V0": m.get_minute_csv("V0"),
             "QUALITY_LOG": m.QUALITY_LOG,
             "OUT": m.OUT,
         }
@@ -292,8 +292,8 @@ class UpdateMinuteBarsIntegrationTests(unittest.TestCase):
              "low": 0.9, "close": 1.0, "volume": 10, "hold": 5},
         ])
 
-        saved, total = m.update_minute_bars("V2701", df)
-        with open(m.get_minute_csv("V2701"), encoding="utf-8-sig") as f:
+        saved, total = m.update_minute_bars("V0", df)
+        with open(m.get_minute_csv("V0"), encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             records = list(reader)
         datetimes = {r["datetime"] for r in records}

@@ -1,4 +1,4 @@
-name: Collect PVC futures data
+name: Collect commodity futures data
 
 on:
   workflow_dispatch:
@@ -40,18 +40,24 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Fetch latest data (minute + daily + realtime, independent)
+      - name: Fetch latest data (minute + daily, independent)
         run: python fetch_pvc.py
 
       - name: Commit all data changes
         run: |
-          git add output/V0_minute_bars.csv output/V2701_minute_bars.csv \
-                 output/V0_daily_bars.csv output/V2701_daily_bars.csv \
-                 output/V0_realtime_snapshots.jsonl output/V2701_realtime_snapshots.jsonl
+          git add output/V0_minute_bars.csv output/V0_daily_bars.csv \
+                 output/TA0_minute_bars.csv output/TA0_daily_bars.csv \
+                 output/MA0_minute_bars.csv output/MA0_daily_bars.csv \
+                 output/PP0_minute_bars.csv output/PP0_daily_bars.csv \
+                 output/L0_minute_bars.csv output/L0_daily_bars.csv \
+                 output/SA0_minute_bars.csv output/SA0_daily_bars.csv \
+                 output/FG0_minute_bars.csv output/FG0_daily_bars.csv \
+                 output/RB0_minute_bars.csv output/RB0_daily_bars.csv \
+                 output/HC0_minute_bars.csv output/HC0_daily_bars.csv
           if git diff --quiet --cached; then
             echo "No data changes; nothing to commit."
           else
-            git commit -m "chore: auto-collect PVC data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            git commit -m "chore: auto-collect commodity futures data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
             for i in 1 2 3; do
               git fetch origin
               git rebase origin/main

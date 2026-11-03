@@ -2,7 +2,7 @@
 """Interface exception failure protection tests.
 
 Verify: when the minute quote interface throws exceptions / returns None / returns empty /
-validation fails, output/V2701_minute_bars.csv and
+validation fails, output/V0_minute_bars.csv and
 output/minute_data_quality.jsonl must not be emptied, truncated, or accidentally overwritten.
 
 These tests use **temporary directories** to simulate formal output paths; all snapshot
@@ -57,7 +57,7 @@ def _lines(p):
 def snapshot():
     """Return (sha, size, count) tuple for before/after comparison."""
     snap = {}
-    minute_csv = m.get_minute_csv("V2701")
+    minute_csv = m.get_minute_csv("V0")
     for key, path in (("csv", minute_csv),
                       ("quality", m.QUALITY_LOG)):
         if Path(path).exists():
@@ -78,10 +78,10 @@ def run_main_minute_block():
     Faithfully reproduce the fetch_pvc.py __main__ minute fetch-update-export flow.
     Interface calls, None/empty checks, and update_minute_bars are all real functions.
     """
-    minute_df = m.ak.futures_zh_minute_sina(symbol="V2701", period="1")
+    minute_df = m.ak.futures_zh_minute_sina(symbol="V0", period="1")
     if minute_df is None or minute_df.empty:
         raise RuntimeError("分钟数据为空，停止更新。")
-    updated, total = m.update_minute_bars("V2701", minute_df)
+    updated, total = m.update_minute_bars("V0", minute_df)
     return updated, total
 
 
@@ -93,7 +93,7 @@ class InterfaceFailureSafetyTests(unittest.TestCase):
 
         # Save original paths
         self._orig = {
-            "MINUTE_BARS_CSV_V2701": m.get_minute_csv("V2701"),
+            "MINUTE_BARS_CSV_V0": m.get_minute_csv("V0"),
             "QUALITY_LOG": m.QUALITY_LOG,
             "OUT": m.OUT,
         }
@@ -103,7 +103,7 @@ class InterfaceFailureSafetyTests(unittest.TestCase):
         m.QUALITY_LOG = self.dir / "minute_data_quality.jsonl"
 
         # Create minimal files so snapshot() works
-        minute_csv = m.get_minute_csv("V2701")
+        minute_csv = m.get_minute_csv("V0")
         if not minute_csv.exists():
             minute_csv.write_text("", encoding="utf-8")
         if not m.QUALITY_LOG.exists():
@@ -148,7 +148,7 @@ class InterfaceFailureSafetyTests(unittest.TestCase):
         """update_minute_bars internal validation fails → raised, CSV file not read/written."""
         bad_df = pd.DataFrame({"foo": [1, 2]})  # Missing all required fields
         with self.assertRaises(ValueError):
-            m.update_minute_bars("V2701", bad_df)
+            m.update_minute_bars("V0", bad_df)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # akshare-futures-data
 
-Collect historical daily and minute bars for PVC continuous contracts (`V0`/`V2701`), perform quality validation, deduplication and merging, and output structured CSV and real-time snapshot JSONL.
+Collect historical daily and minute bars for nine Chinese commodity futures main continuous contracts (PVC/V0, PTA/TA0, Methanol/MA0, PP/PP0, L Plastic/L0, Soda Ash/SA0, Glass/FG0, Rebar/RB0, Hot Rolled Coil/HC0), perform quality validation, deduplication and merging, and output structured CSV.
 
 ## Environment
 
@@ -21,30 +21,20 @@ python fetch_pvc.py
 
 Execution order (each stream is independent, single stream failure does not affect others):
 
-1. **Real-time snapshot**: Fetch `V2701`/`V0` Sina HTTP API real-time quote → strictly validate source date/source time → write to `output/V0_realtime_snapshots.jsonl` / `output/V2701_realtime_snapshots.jsonl`.
-2. **Minute bars**: Fetch `V2701`/`V0` AKShare 1-minute quote → `validate_minute_bars` validation → `separate_future_timestamps` filter bars after collection time (based on `Asia/Shanghai` timezone `collected_at`, 1-minute tolerance) → `update_minute_bars` merge history and atomically write to `output/V0_minute_bars.csv` / `output/V2701_minute_bars.csv`.
-3. **Daily bars**: After day session close (15:00+, Monday to Friday) fetch `V0`/`V2701` AKShare daily bars → `validate_daily_bars` validation → `update_daily_bars` merge history and atomically write to `output/V0_daily_bars.csv` / `output/V2701_daily_bars.csv`.
+1. **Minute bars**: Fetch AKShare 1-minute quote → `validate_minute_bars` validation → `separate_future_timestamps` filter bars after collection time (based on `Asia/Shanghai` timezone `collected_at`, 1-minute tolerance) → `update_minute_bars` merge history and atomically write to `output/{symbol}_minute_bars.csv`.
+2. **Daily bars**: After day session close (15:00+, Monday to Friday) fetch AKShare daily bars → `validate_daily_bars` validation → `update_daily_bars` merge history and atomically write to `output/{symbol}_daily_bars.csv`.
 
 ### Stream Execution Mechanisms
 
 #### Parallel Execution
 
-Three data streams (real-time snapshot, minute bars, daily bars) are independent, executed using `ThreadPoolExecutor`. Each symbol's each stream is submitted as an independent task; total duration depends on the slowest individual task, not the sum of all tasks.
+Two data streams (minute bars, daily bars) are independent, executed using `ThreadPoolExecutor`. Each symbol's each stream is submitted as an independent task; total duration depends on the slowest individual task, not the sum of all tasks.
 
 Expected speedup:
-- After 15:00 (6 tasks): total duration reduced by about 60%-70%, speedup 3-4x
-- Before 15:00 (4 tasks, daily bars skipped): total duration reduced by about 50%-60%, speedup 2-3x
+- After 15:00 (18 tasks): total duration reduced by about 80%-90%, speedup 6-7x
+- Before 15:00 (9 tasks, daily bars skipped): total duration reduced by about 70%-80%, speedup 3-4x
 
-Parallel execution safety: different symbols (V0/V2701) operate on different files, no race condition; good failure isolation, single stream failure does not affect others.
-
-#### Real-time Snapshot (Independent Stream)
-
-- Data source: Sina HTTP API (`https://hq.sinajs.cn/list=nf_{symbol}`), does not use akshare `futures_zh_spot` (the latter has a column count mismatch defect).
-- Fields: `source_date` / `source_time` come from the data source itself, `collected_at` records actual collection time; the two are not confused.
-- Validation: `source_date` must be a valid calendar date; `source_time` must be a valid HHMMSS; otherwise refuse writing, no empty records left.
-- Trading date inference: night sessions at 21:00 and later are assigned to the next calendar day (`infer_trading_date`).
-- Write: JSONL append write, with `(symbol, source_date, source_time)` as deduplication key; the same snapshot is not appended repeatedly.
-- Failure handling: API exception returns `None`, no file written, does not affect other streams.
+Parallel execution safety: different symbols operate on different files, no race condition; good failure isolation, single stream failure does not affect others.
 
 #### Minute Bars (Independent Stream)
 
@@ -66,12 +56,24 @@ Parallel execution safety: different symbols (V0/V2701) operate on different fil
 
 | File | Description |
 |------|-------------|
-| `output/V0_minute_bars.csv` | V0 minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
-| `output/V2701_minute_bars.csv` | V2701 minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
-| `output/V0_daily_bars.csv` | V0 daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
-| `output/V2701_daily_bars.csv` | V2701 daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
-| `output/V0_realtime_snapshots.jsonl` | V0 real-time snapshot stream (JSONL, append write). |
-| `output/V2701_realtime_snapshots.jsonl` | V2701 real-time snapshot stream (JSONL, append write). |
+| `output/V0_daily_bars.csv` | PVC daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/V0_minute_bars.csv` | PVC minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/TA0_daily_bars.csv` | PTA daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/TA0_minute_bars.csv` | PTA minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/MA0_daily_bars.csv` | Methanol daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/MA0_minute_bars.csv` | Methanol minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/PP0_daily_bars.csv` | PP daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/PP0_minute_bars.csv` | PP minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/L0_daily_bars.csv` | Plastic daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/L0_minute_bars.csv` | Plastic minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/SA0_daily_bars.csv` | Soda Ash daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/SA0_minute_bars.csv` | Soda Ash minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/FG0_daily_bars.csv` | Glass daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/FG0_minute_bars.csv` | Glass minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/RB0_daily_bars.csv` | Rebar daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/RB0_minute_bars.csv` | Rebar minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
+| `output/HC0_daily_bars.csv` | Hot Rolled Coil daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
+| `output/HC0_minute_bars.csv` | Hot Rolled Coil minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
 | `output/minute_data_quality.jsonl` | Minute records excluded due to anomalies (e.g., `future_timestamp`) (global). |
 
 ## Quality Filtering Rules
@@ -84,33 +86,21 @@ Parallel execution safety: different symbols (V0/V2701) operate on different fil
 - **Minute bar OHLC check**: Same logic as daily bars; anomalies directly refuse writing.
 - **Volume / open interest**: Must be non-negative; missing values result in `None` for daily bar fields, minute bars are directly rejected.
 
-## DCE Trading Schedule (PVC / Polyvinyl Chloride `v`)
+## Supported Exchanges and Contracts
 
-| Session | Time | Applicable Day |
-|---------|------|----------------|
-| Day session opening auction declaration | 08:55 - 08:59 | Monday to Friday |
-| Day session opening auction matching | 08:59 - 09:00 | Monday to Friday |
-| Day session first period | 09:00 - 10:15 | Monday to Friday |
-| Short break | 10:15 - 10:30 | Monday to Friday |
-| Day session second period | 10:30 - 11:30 | Monday to Friday |
-| Day session third period | 13:30 - 15:00 | Monday to Friday |
-| Night session opening auction declaration | 20:55 - 20:59 | Monday to Friday |
-| Night session opening auction matching | 20:59 - 21:00 | Monday to Friday |
-| Night session continuous auction | 21:00 - 23:00 | Monday to Friday |
+All nine varieties are China Dalian Commodity Exchange (DCE) main continuous contracts. The program directly uses AKShare's main continuous contract codes (e.g., `V0`, `TA0`, `MA0`, etc.), which automatically roll over, without manually constructing continuous series.
 
-### Collection Timing Rules
-
-- **Complete daily bars**: Beijing time after 15:00, Monday to Friday can collect (`is_after_market_close` / `is_after_day_session_close`).
-  - After day session close, the previous night session and today's day session data are ready, so complete daily bars for the current trading day can be collected.
-  - Night sessions are assigned to the next trading day, do not affect today's daily bar completeness.
-- **Weekend**: No collection.
-
-### Trading Date Inference
-
-- Night session quotes at 21:00 and later are assigned to the **next calendar day** as the trading day (`infer_trading_date`).
-- Day session quotes: the trading day is the current natural day.
-
-> Note: The first working day before a statutory holiday has no night session; the code has not yet connected to the DCE trading calendar. This situation requires manual skipping or future calendar check completion.
+| Variety | AKShare Code | Exchange |
+|---------|-------------|----------|
+| PVC | V0 | DCE |
+| PTA | TA0 | DCE |
+| Methanol | MA0 | DCE |
+| PP | PP0 | DCE |
+| Plastic | L0 | DCE |
+| Soda Ash | SA0 | DCE |
+| Glass | FG0 | DCE |
+| Rebar | RB0 | DCE |
+| Hot Rolled Coil | HC0 | DCE |
 
 ## Testing
 
@@ -142,4 +132,4 @@ All tests use temporary directories and Mocks, do not access the real network, d
 | `known_bad_dates` hardcoded | OHLC known anomaly dates (`2011-01-03`, `2020-08-06`) are hardcoded in code | Adding new anomaly dates requires code modification | Move to configuration file or environment variable |
 | Data retention policy | Daily/minute CSV has no data retention period, grows indefinitely | Long-term operation causes repository bloat | Add policy to keep only recent N months of data |
 | Comment language | Mixed Chinese and English comments | Does not affect functionality, but reading experience is inconsistent | Unify comment language |
-| JSONL atomicity | JSONL append write has been changed to atomic replace, but a single corrupted line does not affect other lines | Partial snapshots may be lost in extreme cases | Acceptable, JSONL line independence feature |
+| Minute data rolling window | AKShare minute interface returns rolling window (~1023 records), not full history | Long-term operation loses early minute data | Accept AKShare limitation, add separate archival if needed |

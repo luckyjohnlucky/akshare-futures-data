@@ -68,8 +68,19 @@ TZ = ZoneInfo("Asia/Shanghai")
 
 SYMBOL_NAME_MAP = {
     "V0": "PVC连续",
-    "V2701": "PVC 2701",
+    "TA0": "PTA连续",
+    "MA0": "甲醇连续",
+    "PP0": "PP连续",
+    "L0": "塑料连续",
+    "SA0": "纯碱连续",
+    "FG0": "玻璃连续",
+    "RB0": "螺纹钢连续",
+    "HC0": "热卷连续",
 }
+
+# 需主动采集的合约列表（九个商品期货主力连续）
+# 只有列在此列表中的合约才会被主循环提交采集任务
+ACTIVE_CONTRACTS = ["V0", "TA0", "MA0", "PP0", "L0", "SA0", "FG0", "RB0", "HC0"]
 
 
 def get_daily_csv(symbol: str) -> Path:
@@ -80,11 +91,6 @@ def get_daily_csv(symbol: str) -> Path:
 def get_minute_csv(symbol: str) -> Path:
     """Return the minute CSV path for the given symbol."""
     return OUT / f"{symbol}_minute_bars.csv"
-
-
-def get_snapshot_file(symbol: str) -> Path:
-    """Return the real-time snapshot JSONL path for the given symbol."""
-    return OUT / f"{symbol}_realtime_snapshots.jsonl"
 
 
 QUALITY_LOG = OUT / "minute_data_quality.jsonl"
@@ -113,30 +119,6 @@ def number(value: Any) -> Optional[float | int]:
     if not np.isfinite(f):
         return None
     return int(f) if f == int(f) else f
-
-
-def infer_trading_date(source_date: str, source_time: str) -> str:
-    """
-    Initial trading date inference:
-    Night sessions at 21:00 and later are assigned to the next calendar day.
-
-    Note: Not yet connected to DCE trading calendar; results need verification.
-    source_date/source_time must be strictly validated by the caller;
-    this function does not fall back to the local date.
-    """
-    day = datetime.strptime(source_date, "%Y-%m-%d").date()
-
-    source_time_str = str(source_time).strip()
-    try:
-        hhmmss = int(source_time_str)
-    except (TypeError, ValueError):
-        hhmmss = -1
-
-    if 210000 <= hhmmss <= 235959:
-        day += timedelta(days=1)
-
-    return day.isoformat()
-
 
 
 def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
@@ -283,164 +265,6 @@ def append_jsonl(records: list[dict], log_path: Path | None = None, key_fields: 
             pass
         raise
     return len(new_lines)
-
-
-def fetch_sina_spot(symbol: str = "V0") -> Optional[dict]:
-    """
-    Fetch raw field data for PVC continuous contract (V0) real-time quote from Sina Finance API.
-
-    Call Sina HTTP interface directly instead of akshare.futures_zh_spot
-    (the latter has a ValueError defect due to column count mismatch).
-
-    Returns a dictionary of fields; returns None on failure.
-    """
-    url = f"https://hq.sinajs.cn/list=nf_{symbol}"
-    headers = {
-        "Referer": "https://finance.sina.com.cn/",
-        "User-Agent": "Mozilla/5.0",
-    }
-
-    def _fetch():
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-
-        match = re.search(r'"([^"]*)"', response.text)
-        if not match:
-            raise ValueError("新浪响应中未找到行情数据")
-
-        fields = match.group(1).split(",")
-        if len(fields) < 18:
-            raise ValueError(f"新浪行情字段数不足（{len(fields)} < 18）")
-
-        return {
-            "name": fields[0].strip(),
-            "time": fields[1].strip(),
-            "open": fields[2].strip(),
-            "high": fields[3].strip(),
-            "low": fields[4].strip(),
-            "last_close": fields[5].strip(),
-            "bid_price": fields[6].strip(),
-            "ask_price": fields[7].strip(),
-            "current_price": fields[8].strip(),
-            "avg_price": fields[9].strip(),
-            "last_settle_price": fields[10].strip(),
-            "buy_vol": fields[11].strip(),
-            "sell_vol": fields[12].strip(),
-            "open_interest": fields[13].strip(),
-            "volume": fields[14].strip(),
-            "contract_code": fields[15].strip(),
-            "exchange": fields[16].strip(),
-            "date": fields[17].strip(),
-        }
-
-    try:
-        return _retryable_call(_fetch)
-    except Exception as exc:
-        logger.error("获取新浪实时行情失败：%s", exc)
-        return None
-
-
-def _validate_source_date(value: Any) -> Optional[str]:
-    """Strictly validate source date: must be YYYY-MM-DD and a valid calendar date; otherwise return None."""
-    if value is None:
-        return None
-    s = str(value).strip()
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
-        return None
-    try:
-        datetime.strptime(s, "%Y-%m-%d").date()
-    except ValueError:
-        return None
-    return s
-
-
-def _validate_source_time(value: Any) -> Optional[str]:
-    """Strictly validate source time: must be HHMMSS and valid hours/minutes/seconds; otherwise return None."""
-    if value is None:
-        return None
-    s = str(value).strip()
-    if not re.fullmatch(r"\d{6}", s):
-        return None
-    hh = int(s[0:2])
-    mm = int(s[2:4])
-    ss = int(s[4:6])
-    if hh > 23 or mm > 59 or ss > 59:
-        return None
-    return s
-
-
-def collect_realtime_snapshot(symbol: str = "V0") -> Optional[dict]:
-    """
-    Get PVC continuous contract real-time snapshot, independent of historical CSV.
-
-    Convention:
-    - source_date / source_time come from the data source itself (Sina API), not confusing
-      collection time with quote time.
-    - collected_at records the actual collection time.
-    - Volume and open interest from the data source are saved as-is.
-    - Saved to output/{symbol}_realtime_snapshots.jsonl.
-    - Returns the saved record; returns None on collection failure.
-    """
-    spot = fetch_sina_spot(symbol=symbol)
-    if spot is None:
-        logger.error("实时快照 %s 采集失败，未获取到行情数据", symbol)
-        return None
-
-    collected_at = datetime.now(TZ)
-    source_date = _validate_source_date(spot.get("date"))
-    source_time = _validate_source_time(spot.get("time"))
-
-    if source_date is None:
-        logger.error("无效的源日期（source_date=%r），%s 不写入快照", spot.get("date"), symbol)
-        return None
-    if source_time is None:
-        logger.error("无效的源时间（source_time=%r），%s 不写入快照", spot.get("time"), symbol)
-        return None
-
-    trading_date = infer_trading_date(source_date, source_time)
-
-    is_night = 210000 <= int(source_time) <= 235959
-    trading_date_method = (
-        "inferred_next_calendar_day_for_night_session"
-        if is_night else "calendar_day"
-    )
-
-    bar_datetime = (
-        f"{source_date} {source_time[0:2]}:{source_time[2:4]}:{source_time[4:6]}"
-    )
-
-    last_close_raw = number(spot.get("last_close"))
-    last_settle_raw = number(spot.get("last_settle_price"))
-    vol = number(spot.get("volume"))
-
-    record = {
-        "symbol": symbol,
-        "name": spot.get("name") or SYMBOL_NAME_MAP.get(symbol, "PVC连续"),
-        "source": "Sina HTTP API",
-        "source_date": source_date,
-        "source_time": source_time,
-        "bar_datetime": bar_datetime,
-        "collected_at": collected_at.isoformat(),
-        "trading_date": trading_date,
-        "trading_date_method": trading_date_method,
-        "trading_date_verified": False,
-        "data_type": "realtime_snapshot",
-        "open": number(spot.get("open")),
-        "high": number(spot.get("high")),
-        "low": number(spot.get("low")),
-        "current_price": number(spot.get("current_price")),
-        "bid_price": number(spot.get("bid_price")),
-        "ask_price": number(spot.get("ask_price")),
-        "last_close_raw": last_close_raw,
-        "last_close": None if last_close_raw == 0 else last_close_raw,
-        "last_settle_price_raw": last_settle_raw,
-        "last_settle_price": None if last_settle_raw == 0 else last_settle_raw,
-        "open_interest": number(spot.get("open_interest")),
-        "volume": vol,
-        "is_daily_bar_final": False,
-    }
-    append_jsonl([record], get_snapshot_file(symbol), key_fields=("symbol", "source_date", "source_time"))
-    return record
 
 
 def records_to_csv(records: list[dict], csv_path: Path) -> int:
@@ -788,7 +612,7 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
     Fetch and update daily bar data for the specified symbol.
 
     Parameters:
-        symbol: Contract code, e.g., "V0", "V2701"
+        symbol: Contract code, e.g., "V0", "TA0"
         session_label: Log label, e.g., "day session", "complete"
 
     Returns:
@@ -819,22 +643,6 @@ if __name__ == "__main__":
     )
     OUT.mkdir(parents=True, exist_ok=True)
 
-    def _run_realtime_snapshot(symbol: str):
-        try:
-            snapshot = collect_realtime_snapshot(symbol=symbol)
-            if snapshot:
-                logger.info(
-                    "实时快照 %s：已保存，行情时间 %s %s，采集时间 %s",
-                    sym,
-                    snapshot.get("source_date"),
-                    snapshot.get("source_time"),
-                    snapshot.get("collected_at"),
-                )
-            else:
-                logger.error("实时快照 %s：采集失败，未获取到行情数据", sym)
-        except Exception as exc:
-            logger.error("实时快照 %s 采集失败（不影响其他流程）：%s", sym, exc)
-
     def _run_minute_bars(symbol: str):
         try:
             minute_df = _retryable_call(ak.futures_zh_minute_sina, symbol=symbol, period="1")
@@ -842,25 +650,56 @@ if __name__ == "__main__":
                 raise RuntimeError(f"{symbol} 分钟数据为空，停止更新。")
             updated, total = update_minute_bars(symbol, minute_df)
             logger.info(
-                "分钟线 %s：本次校验 %d 条；文件累计 %d 条；CSV %s",
+                "分钟线 %s：ACTIVE，本次校验 %d 条；文件累计 %d 条；CSV %s",
                 symbol, updated, total, get_minute_csv(symbol),
             )
+        except ValueError as exc:
+            if "Length mismatch" in str(exc):
+                logger.error(
+                    "分钟线 %s：UNKNOWN - 接口返回 Length mismatch，无法确认挂牌状态，类型=%s，消息=%s，允许后续重试",
+                    symbol, type(exc).__name__, exc,
+                )
+            else:
+                logger.error(
+                    "分钟线 %s：ERROR - 数据格式异常，类型=%s，消息=%s，允许后续重试",
+                    symbol, type(exc).__name__, exc,
+                )
         except Exception as exc:
-            logger.error("分钟线 %s 更新失败：%s", symbol, exc)
+            logger.error(
+                "分钟线 %s：ERROR - 接口异常，类型=%s，消息=%s，允许后续重试",
+                symbol, type(exc).__name__, exc,
+            )
 
     def _run_daily_bars(symbol: str):
         try:
             if is_after_market_close():
                 fetch_and_update_daily_bars(symbol, "完整")
+                logger.info(
+                    "日线 %s：ACTIVE，采集成功；CSV %s",
+                    symbol, get_daily_csv(symbol),
+                )
             else:
                 logger.info("日线 %s：未到采集时间，跳过", symbol)
+        except ValueError as exc:
+            if "Length mismatch" in str(exc):
+                logger.error(
+                    "日线 %s：UNKNOWN - 接口返回 Length mismatch，无法确认挂牌状态，类型=%s，消息=%s，允许后续重试",
+                    symbol, type(exc).__name__, exc,
+                )
+            else:
+                logger.error(
+                    "日线 %s：ERROR - 数据格式异常，类型=%s，消息=%s，允许后续重试",
+                    symbol, type(exc).__name__, exc,
+                )
         except Exception as exc:
-            logger.error("日线 %s 更新失败（不影响其他流程）：%s", symbol, exc)
+            logger.error(
+                "日线 %s：ERROR - 接口异常，类型=%s，消息=%s，允许后续重试",
+                symbol, type(exc).__name__, exc,
+            )
 
-    # Three data streams are independent, execute in parallel; each symbol's each stream is an independent task
+    # Two data streams are independent, execute in parallel; each symbol's each stream is an independent task
     tasks = []
-    for sym in ("V0", "V2701"):
-        tasks.append(("realtime", sym, _run_realtime_snapshot))
+    for sym in ACTIVE_CONTRACTS:
         tasks.append(("minute", sym, _run_minute_bars))
         tasks.append(("daily", sym, _run_daily_bars))
 

@@ -29,7 +29,7 @@ class UpdateMinuteBarsCleanupTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self._orig = {
-            "MINUTE_BARS_CSV_V2701": m.get_minute_csv("V2701"),
+            "MINUTE_BARS_CSV_V0": m.get_minute_csv("V0"),
             "QUALITY_LOG": m.QUALITY_LOG,
             "OUT": m.OUT,
         }
@@ -54,12 +54,12 @@ class UpdateMinuteBarsCleanupTests(unittest.TestCase):
         ])
 
         # Make MINUTE_BARS_CSV a directory to force replace() failure
-        m.get_minute_csv("V2701").mkdir(parents=True)
+        m.get_minute_csv("V0").mkdir(parents=True)
 
-        temp_path = m.get_minute_csv("V2701").with_name(m.get_minute_csv("V2701").name + ".tmp")
+        temp_path = m.get_minute_csv("V0").with_name(m.get_minute_csv("V0").name + ".tmp")
 
         with self.assertRaises(Exception):
-            m.update_minute_bars("V2701", df)
+            m.update_minute_bars("V0", df)
 
         # Temp file should be cleaned up
         self.assertFalse(temp_path.exists(),
@@ -72,23 +72,23 @@ class UpdateMinuteBarsCleanupTests(unittest.TestCase):
              "low": 0.9, "close": 1.0, "volume": 10, "hold": 5},
         ])
 
-        m.get_minute_csv("V2701").parent.mkdir(parents=True, exist_ok=True)
+        m.get_minute_csv("V0").parent.mkdir(parents=True, exist_ok=True)
 
         # Make target a directory so replace() fails
-        if m.get_minute_csv("V2701").exists():
-            m.get_minute_csv("V2701").unlink()
-        m.get_minute_csv("V2701").mkdir()
+        if m.get_minute_csv("V0").exists():
+            m.get_minute_csv("V0").unlink()
+        m.get_minute_csv("V0").mkdir()
 
         original_exc = None
         try:
-            m.update_minute_bars("V2701", df)
+            m.update_minute_bars("V0", df)
         except Exception as exc:
             original_exc = exc
 
         self.assertIsNotNone(original_exc)
         # Original exception type should be preserved (NotADirectoryError or similar)
         self.assertIsInstance(original_exc, Exception)
-        temp_path = m.get_minute_csv("V2701").with_name(m.get_minute_csv("V2701").name + ".tmp")
+        temp_path = m.get_minute_csv("V0").with_name(m.get_minute_csv("V0").name + ".tmp")
         self.assertFalse(temp_path.exists())
 
 
@@ -201,16 +201,16 @@ class ConsistencyIntegrationTests(unittest.TestCase):
             {"datetime": "2026-01-01 09:00:00", "open": 5000.0, "high": 5001.0,
              "low": 4999.0, "close": 5000.0, "volume": 1000, "hold": 500},
         ])
-        m.update_minute_bars("V2701", df)
+        m.update_minute_bars("V0", df)
 
-        self.assertTrue(m.get_minute_csv("V2701").exists())
-        with m.get_minute_csv("V2701").open("r", encoding="utf-8-sig") as f:
+        self.assertTrue(m.get_minute_csv("V0").exists())
+        with m.get_minute_csv("V0").open("r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["symbol"], "V2701")
+        self.assertEqual(rows[0]["symbol"], "V0")
         self.assertEqual(rows[0]["datetime"], "2026-01-01 09:00:00")
-        self.assertEqual(rows[0]["name"], "PVC 2701")
+        self.assertEqual(rows[0]["name"], "PVC连续")
 
     def test_daily_csv_output_created(self):
         """After update_daily_bars, CSV file exists and has records."""
