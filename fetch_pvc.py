@@ -122,8 +122,11 @@ def number(value: Any) -> Optional[float | int]:
     return int(f) if f == int(f) else f
 
 
-def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
+def validate_daily_bars(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     """Validate historical daily bars: dates, values, and OHLC logic; delete confirmed source data errors."""
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise ValueError("symbol 必须为非空字符串")
+    
     required = {
         "date", "open", "high", "low", "close",
         "volume", "hold", "settle",
@@ -199,10 +202,17 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
     
     # Identify records to delete
     records_to_delete = []
-    for symbol, errors in confirmed_errors.items():
+    for symbol_err, errors in confirmed_errors.items():
+        if symbol_err != symbol:
+            continue
         for date, error_types in errors.items():
-            # Check if this record matches the anomaly
-            symbol_match = data["symbol"] == symbol if "symbol" in data.columns else True
+            # Strict symbol matching - use the symbol parameter passed to the function
+            if "symbol" in data.columns:
+                symbol_match = data["symbol"] == symbol
+            else:
+                # If no symbol column exists, we can't filter by symbol, so skip this symbol entirely
+                symbol_match = pd.Series(False, index=data.index)
+            
             date_match = normalized_dates == date
             
             # Get OHLC values for this record
@@ -271,6 +281,16 @@ def validate_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
         data[column] = values
 
     # Volume and open interest are not allowed to be missing; return standardized copy after processing
+    data["quality_status"] = "valid"
+    data.loc[known_bad, "quality_status"] = "invalid_ohlc"
+    data.loc[unexpected_bad, "quality_status"] = "invalid_ohlc"
+    if unexpected_bad.any():
+        bad_dates = normalized_dates[unexpected_bad].unique().tolist()[:10]
+        logger.warning(
+            "检测到 %d 条未知 OHLC 异常记录，已标记 invalid_ohlc，日期示例：%s",
+            int(unexpected_bad.sum()), bad_dates,
+        )
+
     data["date"] = normalized_dates
     return data
 
@@ -753,7 +773,7 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
             )
             return 0
 
-    validated = validate_daily_bars(daily_df)
+    validated = validate_daily_bars(daily_df, symbol=symbol)
     count = update_daily_bars(validated, symbol=symbol)
     logger.info(
         f"日线 {symbol}（{session_label}）：本次获取 {len(daily_df)} 条；更新结果 {count} 条；CSV {get_daily_csv(symbol)}",
