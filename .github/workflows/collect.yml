@@ -55,7 +55,7 @@ jobs:
           # Build list of existing CSV files to add
           set -e
           FILES=""
-          for symbol in V0 TA0 MA0 PP0 L0 SA0 FG0 RB0 HC0 H11061; do
+          for symbol in V0 TA0 MA0 PP0 L0 SA0 FG0 RB0 HC0; do
             if [ -f "output/${symbol}_minute_bars.csv" ]; then
               FILES+=" output/${symbol}_minute_bars.csv"
             fi
@@ -64,6 +64,17 @@ jobs:
             fi
           done
           
+          # H11061: collect both old daily_bars and new index_daily formats
+          if [ -f "output/H11061_daily_bars.csv" ]; then
+            FILES+=" output/H11061_daily_bars.csv"
+          fi
+          if [ -f "output/H11061_index_daily.csv" ]; then
+            FILES+=" output/H11061_index_daily.csv"
+          fi
+          if [ -f "output/H11061_minute_bars.csv" ]; then
+            FILES+=" output/H11061_minute_bars.csv"
+          fi
+
           if [ -z "$FILES" ]; then
             echo "No CSV files found to add."
           else

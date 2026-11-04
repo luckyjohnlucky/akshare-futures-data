@@ -109,6 +109,269 @@ def clean(value: Any) -> Any:
     return str(value)
 
 
+def normalize_index_daily_bars(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert ak.futures_index_ccidx(symbol='中证商品期货指数') 的返回数据转换为指数专用结构。
+    
+    Args:
+        df: 从 AKShare futures_index_ccidx 获取的原始 DataFrame
+        
+    Returns:
+        包含 trading_date, index_code, close, settle, change, pct_change 列的标准化 DataFrame
+        
+    Raises:
+        ValueError: 当数据无效时抛出
+    """
+    # 检查 df 是否为 None 或空
+    if df is None or df.empty:
+        raise ValueError("指数日线数据为空")
+    
+    # 中英文字段映射
+    column_map = {
+        '日期': 'trading_date',
+        '指数代码': 'index_code', 
+        '收盘点位': 'close',
+        '结算点位': 'settle',
+        '涨跌': 'change',
+        '涨跌幅': 'pct_change',
+    }
+    
+    # 检查必需的中文列名
+    required_chinese_cols = ['日期', '指数代码', '收盘点位']
+    if not all(col in df.columns for col in required_chinese_cols):
+        missing_cols = [col for col in required_chinese_cols if col not in df.columns]
+        raise ValueError(f"指数日线数据缺少必要字段：{missing_cols}")
+    
+    # 只保留需要的列并重命名
+    available_cols = [col for col in column_map.keys() if col in df.columns]
+    normalized = df[available_cols].rename(columns=column_map)
+    
+    # 验证指数代码
+    invalid_codes = normalized[~normalized['index_code'].astype(str).str.strip().eq('100001.CCI')]
+    if not invalid_codes.empty:
+        examples = invalid_codes['index_code'].head(5).tolist()
+        raise ValueError(f"指数代码必须为 100001.CCI，但发现了 {len(invalid_codes)} 条记录：{examples}")
+    
+    # 验证日期格式
+    dates = pd.to_datetime(normalized['trading_date'], errors='coerce')
+    if dates.isna().any():
+        bad_rows = normalized.index[dates.isna()].tolist()[:10]
+        raise ValueError(f"指数日线存在无效交易日期：{bad_rows}")
+    
+    # 检查重复日期
+    normalized_dates = dates.dt.strftime("%Y-%m-%d")
+    duplicated = normalized_dates[normalized_dates.duplicated(keep=False)]
+    if not duplicated.empty:
+        examples = sorted(set(duplicated.tolist()))[:10]
+        raise ValueError(f"指数日线存在重复日期：{examples}")
+    
+    # 检查日期排序（升序）
+    if not normalized_dates.is_monotonic_increasing:
+        raise ValueError("指数日线日期必须按升序排列")
+    
+    # 日期转换为 %Y-%m-%d 字符串格式
+    normalized['trading_date'] = normalized_dates
+    
+    # close 必须是有限、正数
+    close_values = pd.to_numeric(normalized['close'], errors='coerce')
+    if close_values.isna().any():
+        invalid_indices = normalized.index[close_values.isna()].tolist()[:10]
+        raise ValueError(f"close 字段存在缺失或非数值，行索引示例：{invalid_indices}")
+    
+    if not np.isfinite(close_values).all():
+        invalid_indices = normalized.index[~np.isfinite(close_values)].tolist()[:10]
+        raise ValueError(f"close 字段存在非有限数值，行索引示例：{invalid_indices}")
+    
+    if (close_values <= 0).any():
+        invalid_indices = normalized.index[close_values <= 0].tolist()[:10]
+        raise ValueError(f"close 字段存在小于或等于 0 的值，行索引示例：{invalid_indices}")
+    
+    normalized['close'] = close_values
+    
+    # 确保可选字段存在，如果不存在则设置为 None
+    for field in ['settle', 'change', 'pct_change']:
+        if field not in normalized.columns:
+            normalized[field] = None
+    
+    # 只保留需要的字段
+    required_fields = ['trading_date', 'index_code', 'close', 'settle', 'change', 'pct_change']
+    result = normalized[required_fields].copy()
+    
+    return result
+
+
+def validate_index_daily_bars(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """独立校验函数，独立于商品期货的 validate_daily_bars。
+    
+    Args:
+        df: 指数日线数据 DataFrame
+        symbol: 合约代码，必须为 "H11061"
+        
+    Returns:
+        包含 quality_status 列的校验通过的 DataFrame
+        
+    Raises:
+        ValueError: 当校验失败时抛出
+    """
+    # symbol 必须为非空字符串
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise ValueError("symbol 必须为非空字符串")
+    
+    if symbol != "H11061":
+        raise ValueError(f"指数日线只支持 symbol=H11061，但得到了：{symbol}")
+    
+    # 必需字段校验
+    required_fields = ["trading_date", "index_code", "close"]
+    missing = [field for field in required_fields if field not in df.columns]
+    if missing:
+        raise ValueError(f"指数日线缺少必要字段：{missing}")
+    
+    # 空数据校验
+    if df.empty:
+        raise ValueError("指数日线数据为空")
+    
+    data = df.copy()
+    
+    # 日期校验
+    dates = pd.to_datetime(data["trading_date"], errors="coerce")
+    if dates.isna().any():
+        bad_rows = data.index[dates.isna()].tolist()[:10]
+        raise ValueError(f"指数日线存在无效交易日期，行索引示例：{bad_rows}")
+    
+    # 日期重复校验
+    normalized_dates = dates.dt.strftime("%Y-%m-%d")
+    duplicated = normalized_dates[normalized_dates.duplicated(keep=False)]
+    if not duplicated.empty:
+        examples = sorted(set(duplicated.tolist()))[:10]
+        raise ValueError(f"指数日线存在重复日期：{examples}")
+    
+    # 日期升序校验
+    if not normalized_dates.is_monotonic_increasing:
+        raise ValueError("指数日线日期必须按升序排列")
+    
+    # index_code 校验
+    data["index_code"] = data["index_code"].astype(str).str.strip()
+    invalid_codes = data[~data["index_code"].eq("100001.CCI")]
+    if not invalid_codes.empty:
+        examples = invalid_codes["index_code"].head(5).tolist()
+        raise ValueError(f"指数代码必须为 100001.CCI，但发现了 {len(invalid_codes)} 条记录：{examples}")
+    
+    # close 必须是有限、正数
+    close_values = pd.to_numeric(data["close"], errors="coerce")
+    if close_values.isna().any():
+        invalid_indices = data.index[close_values.isna()].tolist()[:10]
+        raise ValueError(f"close 字段存在缺失或非数值，行索引示例：{invalid_indices}")
+    
+    if not np.isfinite(close_values).all():
+        invalid_indices = data.index[~np.isfinite(close_values)].tolist()[:10]
+        raise ValueError(f"close 字段存在非有限数值，行索引示例：{invalid_indices}")
+    
+    if (close_values <= 0).any():
+        invalid_indices = data.index[close_values <= 0].tolist()[:10]
+        raise ValueError(f"close 字段存在小于或等于 0 的值，行索引示例：{invalid_indices}")
+    
+    data["close"] = close_values
+    
+    # settle、change、pct_change 缺失时保留为 None
+    for field in ["settle", "change", "pct_change"]:
+        if field in data.columns:
+            # 将空值转换为 None
+            data[field] = data[field].where(pd.notnull(data[field]), None)
+    
+    # 标记质量状态
+    data["quality_status"] = "valid"
+    
+    return data
+
+
+def update_index_daily_bars(df: pd.DataFrame, symbol: str = "H11061") -> int:
+    """独立于 update_daily_bars 的指数日线写入函数。
+    
+    Args:
+        df: 校验通过的指数日线数据
+        symbol: 合约代码，默认 "H11061"
+        
+    Returns:
+        更新记录数
+    """
+    # 验证 symbol
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise ValueError("symbol 必须为非空字符串")
+    
+    if symbol != "H11061":
+        raise ValueError(f"指数日线只支持 symbol=H11061，但得到了：{symbol}")
+    
+    # 元数据
+    name = "中证商品期货指数"
+    index_code = "100001.CCI"
+    source = "AKShare futures_index_ccidx"
+    collected_at_str = datetime.now(TZ).isoformat()
+    
+    # 构建记录
+    records_by_key = {}
+    
+    # 读取现有文件
+    index_csv = OUT / f"{symbol}_index_daily.csv"
+    if index_csv.exists():
+        old_records = csv_to_records(index_csv)
+        for item in old_records:
+            if not isinstance(item, dict) or not item.get("symbol") or not item.get("trading_date"):
+                raise ValueError("指数日线历史文件存在缺少 symbol/trading_date 的记录")
+            key = (item["symbol"], item["trading_date"])
+            records_by_key[key] = item
+    
+    # 处理新记录
+    for _, row in df.iterrows():
+        trading_date = pd.to_datetime(row["trading_date"]).date().isoformat()
+        
+        # 验证必需字段
+        if pd.isna(row.get("close")) or row["close"] is None:
+            raise ValueError(f"交易日期 {trading_date} 缺少 close 字段")
+        
+        # 保留原始 float 值类型，避免转换为整数
+        close_val = row["close"]
+        if pd.isna(close_val):
+            close_val = None
+        
+        settle_val = row.get("settle")
+        if pd.isna(settle_val):
+            settle_val = None
+        
+        change_val = row.get("change")
+        if pd.isna(change_val):
+            change_val = None
+        
+        pct_change_val = row.get("pct_change")
+        if pd.isna(pct_change_val):
+            pct_change_val = None
+        
+        record = {
+            "symbol": symbol,
+            "name": name,
+            "index_code": index_code,
+            "trading_date": trading_date,
+            "close": close_val,
+            "settle": settle_val,
+            "change": change_val,
+            "pct_change": pct_change_val,
+            "quality_status": clean(row.get("quality_status")) or "valid",
+            "source": source,
+            "collected_at": collected_at_str,
+        }
+        
+        # 相同交易日更新
+        records_by_key[(symbol, trading_date)] = record
+    
+    # 按 symbol, trading_date 排序
+    result = sorted(
+        records_by_key.values(),
+        key=lambda item: (item["symbol"], item["trading_date"]),
+    )
+    
+    # 写入文件（原子写入）
+    count = records_to_csv(result, index_csv)
+    return count
+
+
 def number(value: Any) -> Optional[float | int]:
     value = clean(value)
     if value is None:
@@ -717,6 +980,31 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
     Returns:
         新增记录数，失败返回 None
     """
+    # H11061 使用独立指数流程
+    if symbol == "H11061":
+        try:
+            # 调用 AKShare 接口获取指数日线数据
+            daily_df = _retryable_call(ak.futures_index_ccidx, symbol='中证商品期货指数')
+            if daily_df is None or daily_df.empty:
+                raise RuntimeError(f"{symbol} 指数数据为空，停止更新。")
+            
+            # 使用独立指数流程：标准化 -> 校验 -> 更新
+            normalized = normalize_index_daily_bars(daily_df)
+            validated = validate_index_daily_bars(normalized, symbol=symbol)
+            count = update_index_daily_bars(validated, symbol=symbol)
+            
+            logger.info(
+                f"日线 {symbol}（{session_label}）：本次获取 {len(daily_df)} 条；更新结果 {count} 条；CSV output/{symbol}_index_daily.csv",
+            )
+            return count
+            
+        except Exception as e:
+            logger.error(
+                f"日线 {symbol}（{session_label}）：ERROR - 指数数据异常，类型={type(e).__name__}，消息={e}",
+            )
+            raise
+    
+    # 商品期货使用原有流程
     # 获取本地已有数据的最新交易日期
     existing_csv = get_daily_csv(symbol)
     last_trading_date = None
@@ -729,37 +1017,14 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
             last_trading_date = None
 
     # 调用 AKShare 接口获取日线数据（AKShare 不支持指定日期范围，只能获取全量）
-    is_index = symbol in {"H11061", "H30009"}  # 具体合约代码 vs 指数代码
-    if is_index:
-        # 指数使用 futures_index_ccidx 接口，固定使用 '中证商品期货指数' 作为 symbol
-        daily_df = _retryable_call(ak.futures_index_ccidx, symbol='中证商品期货指数')
-        if daily_df is None or daily_df.empty:
-            raise RuntimeError(f"{symbol} 指数数据为空，停止更新。")
-        # 指数数据字段映射：AKShare 返回的字段名 -> 标准字段名
-        # 注意：futures_index_ccidx 返回的列名是中英文混合
-        column_map = {
-            '日期': 'date',
-            'openingPrice': 'open',
-            'highPrice': 'high',
-            'lowPrice': 'low',
-            '收盘点位': 'close',
-            '结算点位': 'settle',
-        }
-        # 只保留需要的列并重命名
-        available_cols = [col for col in daily_df.columns if col in column_map]
-        daily_df = daily_df[available_cols].rename(columns=column_map)
-        # 指数数据没有成交量和持仓量，设为 0
-        daily_df['volume'] = 0
-        daily_df['hold'] = 0
-    else:
-        daily_df = _retryable_call(ak.futures_zh_daily_sina, symbol=symbol)
-        if daily_df is None or daily_df.empty:
-            raise RuntimeError(f"{symbol} 日线数据为空，停止更新。")
+    daily_df = _retryable_call(ak.futures_zh_daily_sina, symbol=symbol)
+    if daily_df is None or daily_df.empty:
+        raise RuntimeError(f"{symbol} 日线数据为空，停止更新。")
 
-        required = {"date", "open", "high", "low", "close", "volume", "hold", "settle"}
-        missing = required - set(daily_df.columns)
-        if missing:
-            raise ValueError(f"{symbol} 日线数据缺少字段：{sorted(missing)}")
+    required = {"date", "open", "high", "low", "close", "volume", "hold", "settle"}
+    missing = required - set(daily_df.columns)
+    if missing:
+        raise ValueError(f"{symbol} 日线数据缺少字段：{sorted(missing)}")
 
     # 将 date 列转换为字符串格式，便于比较
     daily_df['date'] = pd.to_datetime(daily_df['date']).dt.strftime('%Y-%m-%d')

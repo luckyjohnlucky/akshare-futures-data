@@ -74,7 +74,7 @@ Parallel execution safety: different symbols operate on different files, no race
 | `output/RB0_minute_bars.csv` | Rebar minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
 | `output/HC0_daily_bars.csv` | Hot Rolled Coil daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. |
 | `output/HC0_minute_bars.csv` | Hot Rolled Coil minute bars, merged and deduplicated by `(symbol, datetime)`, sorted by time ascending. |
-| `output/H11061_daily_bars.csv` | 中证商品期货指数 daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. Volume and open interest are 0 (index has no volume/open interest data). |
+| `output/H11061_index_daily.csv` | 中证商品期货指数 daily bars, merged and deduplicated by `(symbol, trading_date)`, sorted by date ascending. Volume and open interest are 0 (index has no volume/open interest data) |
 | `output/minute_data_quality.jsonl` | Minute records excluded due to anomalies (e.g., `future_timestamp`) (global). |
 
 ## Quality Filtering Rules
@@ -89,25 +89,69 @@ Parallel execution safety: different symbols operate on different files, no race
 
 ## Supported Exchanges and Contracts
 
-All nine varieties are China Dalian Commodity Exchange (DCE) main continuous contracts. The program directly uses AKShare's main continuous contract codes (e.g., `V0`, `TA0`, `MA0`, etc.), which automatically roll over, without manually constructing continuous series.
+**DCE (China Dalian Commodity Exchange):**
+| Variety | AKShare Code |
+|---------|-------------|
+| PVC | V0 |
+| PP | PP0 |
+| Plastic | L0 |
 
-| Variety | AKShare Code | Exchange |
-|---------|-------------|----------|
-| PVC | V0 | DCE |
-| PTA | TA0 | DCE |
-| Methanol | MA0 | DCE |
-| PP | PP0 | DCE |
-| Plastic | L0 | DCE |
-| Soda Ash | SA0 | DCE |
-| Glass | FG0 | DCE |
-| Rebar | RB0 | DCE |
-| Hot Rolled Coil | HC0 | DCE |
+**CZC (China Zhengzhou Commodity Exchange):**
+| Variety | AKShare Code |
+|---------|-------------|
+| PTA | TA0 |
+| Methanol | MA0 |
+| Soda Ash | SA0 |
+| Glass | FG0 |
+
+**SHFE (Shanghai Futures Exchange):**
+| Variety | AKShare Code |
+|---------|-------------|
+| Rebar | RB0 |
+| Hot Rolled Coil | HC0 |
+
+## H11061 中证商品期货指数日线
+
+H11061 中证商品期货指数日线采集功能:
+- 数据来源：`ak.futures_index_ccidx(symbol='中证商品期货指数')`
+- 输出文件：`output/H11061_index_daily.csv`
+- 字段说明：`trading_date`, `index_code(100001.CCI)`, `close`, `settle`, `change`, `pct_change`, `quality_status`, `source`, `collected_at`
+- 无 OHLC、volume、hold 字段 (指数无成交量/持仓)
+- `volume`、`hold` 固定为 0 (占位)
+- `quality_status`：`valid` / `invalid` (指数专用状态)
+
+H11061 使用独立指数采集流程 (`ak.futures_index_ccidx`)，不走普通商品期货 `futures_zh_daily_sina` 路径，无分钟线采集 (指数无分钟线)。
+
+H11061 指数日线数据结构说明:
+- 输出文件：`output/H11061_index_daily.csv`
+- 字段含义表
+- `quality_status`：`valid` / `invalid` (指数专用，非 `invalid_ohlc`)
+
+H11061 指数日线增量更新机制:
+- 首次运行：全量导入
+- 增量更新：按 `trading_date` 去重，新数据覆盖旧记录
+- 空数据/异常保护：接口异常/空数据不写入、不覆盖历史
+
+H11061 GitHub Actions 工作流:
+- Workflow 手动触发 (`workflow_dispatch`)
+- H11061 三文件独立收集 (旧日线、新指数日线、分钟线)
+- 修复重复收集问题
+
+H11061 相关测试说明:
+- 新增 `test_index_daily.py` (14 个测试)
+- 新增 `test_workflow_collect.sh` (8 个场景)
+
+The program directly uses AKShare's main continuous contract codes, which automatically roll over, without manually constructing continuous series.
 
 ## Testing
 
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+H11061 相关测试说明:
+- 新增 `test_index_daily.py` (14 个测试)
+- 新增 `test_workflow_collect.sh` (8 个场景)
 
 All tests use temporary directories and Mocks, do not access the real network, do not read or write formal data files.
 
