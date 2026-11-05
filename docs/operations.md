@@ -52,7 +52,7 @@ Workflow: `.github/workflows/collect.yml`.
 | Request hangs indefinitely | AKShare functions have no exposed `timeout`; underlying `requests.get` can block. Recorded as P0-4 (V2.3.2). |
 | Some symbols missing from output | A task failed silently — task exceptions are only logged, not propagated. Recorded as P0-2 (V2.3.2). |
 | `minute_data_quality.jsonl` absent | Either no future-timestamp anomalies were produced, or the log was cleared. Absence does not prove the filter never ran (U-4). |
-| `output/H11061_daily_bars.csv` missing from working tree | Tracked in Git but deleted locally; deletion is uncommitted. The replacement is `output/H11061_index_daily.csv`. |
+| `output/H11061_daily_bars.csv` no longer exists | The legacy generic-schema file was removed from Git tracking; the replacement is `output/H11061_index_daily.csv`. |
 | Workflow pushes to an unexpected branch | Push target is `${GITHUB_REF_NAME}`, i.e. the branch that triggered the run. Branch scope is only `GITHUB_REF_TYPE == branch` (P2-4). |
 
 ## Maintenance notes

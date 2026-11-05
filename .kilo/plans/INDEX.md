@@ -43,7 +43,7 @@ manifest; `INDEX.md` itself is not listed.
 | File | Type | Status |
 |------|------|--------|
 | `1793810425413-doc-governance-review-fixes.md` | review fixes | historical |
-| `1793812557469-h11061-daily-bars-deletion-investigation.md` | investigation | historical |
+| `1793812557469-h11061-daily-bars-deletion-investigation.md` | investigation | historical (P3-2 migration cleanup completed 2026-11-05) |
 | `1793813500000-v0-ohlc-anomaly-verification.md` | verification | historical |
 | `1793814557469-v0-ohlc-fix-execution.md` | execution record | historical |
 | `1793816000000-v0-downstream-governance-plan.md` | plan | historical |

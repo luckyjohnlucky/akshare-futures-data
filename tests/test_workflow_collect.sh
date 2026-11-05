@@ -34,9 +34,6 @@ test_scenario_1() {
             FILES+=("output/${symbol}_daily_bars.csv")
         fi
     done
-    if [ -f "output/H11061_daily_bars.csv" ]; then
-        FILES+=("output/H11061_daily_bars.csv")
-    fi
     if [ -f "output/H11061_index_daily.csv" ]; then
         FILES+=("output/H11061_index_daily.csv")
     fi
@@ -57,16 +54,13 @@ test_scenario_1() {
 }
 
 test_scenario_2() {
-    echo "Test 2: H11061 old daily bars only"
+    echo "Test 2: H11061 old daily bars legacy file is ignored"
     
     rm -rf output
     mkdir -p output
     touch "output/H11061_daily_bars.csv"
     
     local FILES=()
-    if [ -f "output/H11061_daily_bars.csv" ]; then
-        FILES+=("output/H11061_daily_bars.csv")
-    fi
     if [ -f "output/H11061_index_daily.csv" ]; then
         FILES+=("output/H11061_index_daily.csv")
     fi
@@ -75,12 +69,21 @@ test_scenario_2() {
     fi
     
     local file_count=${#FILES[@]}
+    local has_legacy=0
     
-    if [ $file_count -eq 1 ] && contains "${FILES[0]}" "H11061_daily_bars.csv"; then
-        echo "Test 2: PASS - H11061 old daily bars collected"
+    if [ $file_count -gt 0 ]; then
+        for file in "${FILES[@]}"; do
+            if contains "$file" "H11061_daily_bars.csv"; then
+                ((has_legacy++))
+            fi
+        done
+    fi
+
+    if [ $file_count -eq 0 ] && [ $has_legacy -eq 0 ]; then
+        echo "Test 2: PASS - Legacy H11061 daily bars ignored"
         return 0
     else
-        echo "Test 2: FAIL - Expected H11061 old daily bars"
+        echo "Test 2: FAIL - Expected legacy file to be ignored, got $file_count files (legacy count: $has_legacy)"
         return 1
     fi
 }
@@ -93,9 +96,6 @@ test_scenario_3() {
     touch "output/H11061_index_daily.csv"
     
     local FILES=()
-    if [ -f "output/H11061_daily_bars.csv" ]; then
-        FILES+=("output/H11061_daily_bars.csv")
-    fi
     if [ -f "output/H11061_index_daily.csv" ]; then
         FILES+=("output/H11061_index_daily.csv")
     fi
@@ -122,9 +122,6 @@ test_scenario_4() {
     touch "output/H11061_minute_bars.csv"
     
     local FILES=()
-    if [ -f "output/H11061_daily_bars.csv" ]; then
-        FILES+=("output/H11061_daily_bars.csv")
-    fi
     if [ -f "output/H11061_index_daily.csv" ]; then
         FILES+=("output/H11061_index_daily.csv")
     fi
@@ -144,7 +141,7 @@ test_scenario_4() {
 }
 
 test_scenario_5() {
-    echo "Test 5: H11061 both old and new daily files only"
+    echo "Test 5: H11061 old daily file ignored, new index daily collected"
     
     rm -rf output
     mkdir -p output
@@ -152,9 +149,6 @@ test_scenario_5() {
     touch "output/H11061_index_daily.csv"
     
     local FILES=()
-    if [ -f "output/H11061_daily_bars.csv" ]; then
-        FILES+=("output/H11061_daily_bars.csv")
-    fi
     if [ -f "output/H11061_index_daily.csv" ]; then
         FILES+=("output/H11061_index_daily.csv")
     fi
@@ -174,17 +168,17 @@ test_scenario_5() {
         fi
     done
     
-    if [ $file_count -eq 2 ] && [ $has_daily -eq 1 ] && [ $has_index -eq 1 ]; then
-        echo "Test 5: PASS - Both H11061 daily files collected"
+    if [ $file_count -eq 1 ] && [ $has_daily -eq 0 ] && [ $has_index -eq 1 ]; then
+        echo "Test 5: PASS - Only new index daily collected, old ignored"
         return 0
     else
-        echo "Test 5: FAIL - Expected 2 files: old daily and new index daily"
+        echo "Test 5: FAIL - Expected only new index daily, got $file_count files (legacy: $has_daily, index: $has_index)"
         return 1
     fi
 }
 
 test_scenario_6() {
-    echo "Test 6: All H11061 file types"
+    echo "Test 6: All H11061 file types, old ignored"
     
     rm -rf output
     mkdir -p output
@@ -193,9 +187,6 @@ test_scenario_6() {
     touch "output/H11061_minute_bars.csv"
     
     local FILES=()
-    if [ -f "output/H11061_daily_bars.csv" ]; then
-        FILES+=("output/H11061_daily_bars.csv")
-    fi
     if [ -f "output/H11061_index_daily.csv" ]; then
         FILES+=("output/H11061_index_daily.csv")
     fi
@@ -218,11 +209,11 @@ test_scenario_6() {
         fi
     done
     
-    if [ $file_count -eq 3 ] && [ $has_daily -eq 1 ] && [ $has_index -eq 1 ] && [ $has_minute -eq 1 ]; then
-        echo "Test 6: PASS - All 3 H11061 file types collected"
+    if [ $file_count -eq 2 ] && [ $has_daily -eq 0 ] && [ $has_index -eq 1 ] && [ $has_minute -eq 1 ]; then
+        echo "Test 6: PASS - Index and minute collected, old ignored"
         return 0
     else
-        echo "Test 6: FAIL - Expected 3 files: daily, index daily, minute bars"
+        echo "Test 6: FAIL - Expected 2 files: index daily, minute bars (legacy: $has_daily)"
         return 1
     fi
 }
@@ -242,9 +233,6 @@ test_scenario_7() {
             FILES+=("output/${symbol}_daily_bars.csv")
         fi
     done
-    if [ -f "output/H11061_daily_bars.csv" ]; then
-        FILES+=("output/H11061_daily_bars.csv")
-    fi
     if [ -f "output/H11061_index_daily.csv" ]; then
         FILES+=("output/H11061_index_daily.csv")
     fi
@@ -284,9 +272,6 @@ test_scenario_8() {
             FILES+=("output/${symbol}_daily_bars.csv")
         fi
     done
-    if [ -f "output/H11061_daily_bars.csv" ]; then
-        FILES+=("output/H11061_daily_bars.csv")
-    fi
     if [ -f "output/H11061_index_daily.csv" ]; then
         FILES+=("output/H11061_index_daily.csv")
     fi

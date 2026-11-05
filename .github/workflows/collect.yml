@@ -64,10 +64,7 @@ jobs:
             fi
           done
           
-          # H11061: collect both old daily_bars and new index_daily formats
-          if [ -f "output/H11061_daily_bars.csv" ]; then
-            FILES+=" output/H11061_daily_bars.csv"
-          fi
+          # H11061: collect new index daily and minute placeholder
           if [ -f "output/H11061_index_daily.csv" ]; then
             FILES+=" output/H11061_index_daily.csv"
           fi

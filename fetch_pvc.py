@@ -1097,7 +1097,10 @@ if __name__ == "__main__":
                 fetch_and_update_daily_bars(symbol, "完整")
                 logger.info(
                     "日线 %s：ACTIVE，采集成功；CSV %s",
-                    symbol, get_daily_csv(symbol),
+                    symbol,
+                    f"output/{symbol}_index_daily.csv"
+                    if symbol == "H11061"
+                    else get_daily_csv(symbol),
                 )
             else:
                 logger.info("日线 %s：未到采集时间，跳过", symbol)

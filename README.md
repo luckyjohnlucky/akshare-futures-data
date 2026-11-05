@@ -80,7 +80,7 @@ Parallel execution safety: different symbols operate on different files, no race
 | `output/H11061_minute_bars.csv` | 0-byte placeholder (index has no minute bars); not a data file |
 | `output/minute_data_quality.jsonl` | Minute records excluded due to anomalies (e.g., `future_timestamp`) (global). **Note: this file does not currently exist** — its absence does not prove the filter never ran. |
 
-> Note: `output/H11061_daily_bars.csv` (the older daily-bars format) is tracked in Git but has been deleted from the working tree; the deletion is uncommitted. It is not listed above because it is absent from the working tree. The current index daily file is `output/H11061_index_daily.csv`.
+> Note: `output/H11061_daily_bars.csv` (the older daily-bars format) has been removed from Git tracking; the current index daily file is `output/H11061_index_daily.csv`.
 
 ## Quality Filtering Rules
 
@@ -138,7 +138,7 @@ H11061 指数日线增量更新机制:
 
 H11061 GitHub Actions 工作流:
 - Workflow 手动触发 (`workflow_dispatch`)，无定时触发。
-- 提交时按文件存在性动态加入：旧日线 `H11061_daily_bars.csv`、新指数日线 `H11061_index_daily.csv`、分钟线占位 `H11061_minute_bars.csv`（0 字节，指数无分钟线）。
+- 提交时按文件存在性动态加入：新指数日线 `H11061_index_daily.csv`、分钟线占位 `H11061_minute_bars.csv`（0 字节，指数无分钟线）。
 - `H11061_minute_bars.csv` 为 0 字节占位文件，不代表采集失败。
 
 H11061 相关测试说明:
