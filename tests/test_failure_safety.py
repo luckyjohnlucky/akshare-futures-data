@@ -151,5 +151,100 @@ class InterfaceFailureSafetyTests(unittest.TestCase):
             m.update_minute_bars("V0", bad_df)
 
 
+class RunCollectionTests(unittest.TestCase):
+    """run_collection() exit-code and aggregation tests (mock only, no network/files)."""
+
+    def _ok(self, tt, sym):
+        return m.TaskResult(tt, sym, "success")
+
+    # 1. all succeed
+    def test_all_success_returns_zero(self):
+        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
+             patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "V0", "success")):
+            self.assertEqual(m.run_collection(["V0"]), 0)
+
+    # 2. single daily failure
+    def test_single_daily_failure_nonzero(self):
+        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
+             patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "V0", "failed", "RuntimeError", "daily boom")):
+            self.assertNotEqual(m.run_collection(["V0"]), 0)
+
+    # 3. single minute failure
+    def test_single_minute_failure_nonzero(self):
+        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "failed", "ConnectionError", "net down")), \
+             patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "V0", "success")):
+            self.assertNotEqual(m.run_collection(["V0"]), 0)
+
+    # 4. multiple failures all collected
+    def test_multiple_failures_all_collected(self):
+        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "failed", "E1", "m1")), \
+             patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "V0", "failed", "E2", "m2")):
+            with self.assertLogs(m.logger, level="ERROR") as cm:
+                code = m.run_collection(["V0"])
+            self.assertNotEqual(code, 0)
+            joined = " ".join(cm.output)
+            self.assertIn("E1", joined)
+            self.assertIn("E2", joined)
+            self.assertIn("minute", joined)
+            self.assertIn("daily", joined)
+
+    # 5. partial success still runs, nonzero
+    def test_partial_success_runs_and_nonzero(self):
+        def minute_ok(sym):
+            return m.TaskResult("minute", sym, "success")
+        def daily_fail(sym):
+            return m.TaskResult("daily", sym, "failed", "RuntimeError", "bad")
+        with patch.object(m, "_run_minute_bars", side_effect=minute_ok), \
+             patch.object(m, "_run_daily_bars", side_effect=daily_fail):
+            self.assertNotEqual(m.run_collection(["V0"]), 0)
+
+    # 6. uncaught exception in a future is caught by scheduler
+    def test_uncaught_future_exception_caught(self):
+        def boom(sym):
+            raise RuntimeError("uncradle boom")
+        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
+             patch.object(m, "_run_daily_bars", side_effect=boom):
+            with self.assertLogs(m.logger, level="ERROR") as cm:
+                code = m.run_collection(["V0"])
+            self.assertNotEqual(code, 0)
+            self.assertTrue(any("boom" in line or "RuntimeError" in line or "调度器" in line for line in cm.output))
+
+    # 7. log contains task type, symbol, error type and message
+    def test_log_contains_type_symbol_exc_and_msg(self):
+        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "TA0", "success")), \
+             patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "TA0", "failed", "ValueError", "length mismatch!")):
+            with self.assertLogs(m.logger, level="ERROR") as cm:
+                self.assertNotEqual(m.run_collection(["TA0"]), 0)
+            joined = " ".join(cm.output)
+            self.assertIn("daily", joined)
+            self.assertIn("TA0", joined)
+            self.assertIn("ValueError", joined)
+            self.assertIn("length mismatch!", joined)
+
+    # 8. skipped (non-trading-time) tasks are not failures
+    def test_skipped_outside_trading_hours_zero(self):
+        with patch.object(m, "is_after_market_close", return_value=False), \
+             patch.object(m, "fetch_and_update_daily_bars") as mock_fetch:
+            self.assertEqual(m._run_daily_bars("V0").status, "success")
+            mock_fetch.assert_not_called()
+
+    # 9. empty list submits nothing and returns 0
+    def test_empty_list_no_tasks_zero(self):
+        with patch.object(m, "_run_minute_bars") as mock_m, \
+             patch.object(m, "_run_daily_bars") as mock_d:
+            self.assertEqual(m.run_collection([]), 0)
+            mock_m.assert_not_called()
+            mock_d.assert_not_called()
+
+    # 10. wrapper returning None is a failure
+    def test_none_result_is_failure(self):
+        with patch.object(m, "_run_minute_bars", return_value=None), \
+             patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "V0", "success")):
+            with self.assertLogs(m.logger, level="ERROR") as cm:
+                code = m.run_collection(["V0"])
+            self.assertNotEqual(code, 0)
+            self.assertTrue(any("None" in line for line in cm.output))
+
+
 if __name__ == "__main__":
     unittest.main()

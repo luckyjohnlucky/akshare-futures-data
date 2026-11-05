@@ -7,6 +7,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -14,12 +15,44 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
+import requests
+
+_original_requests_get = requests.get
+
+def _requests_get_with_timeout(*args, **kwargs):
+    if "timeout" not in kwargs or kwargs["timeout"] is None:
+        kwargs["timeout"] = (10, 30)
+    response = _original_requests_get(*args, **kwargs)
+    response.raise_for_status()
+    return response
+
+requests.get = _requests_get_with_timeout
+requests.api.get = _requests_get_with_timeout
+
 import akshare as ak
 import numpy as np
 import pandas as pd
-import requests
 
 logger = logging.getLogger(__name__)
+
+HTTP_CONNECT_TIMEOUT = 10
+HTTP_READ_TIMEOUT = 30
+HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)
+RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def _is_retryable_exception(exc: Exception) -> bool:
+    if isinstance(exc, requests.Timeout):
+        return True
+    if isinstance(exc, requests.ConnectionError):
+        return True
+    if isinstance(exc, requests.HTTPError):
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        return status_code in RETRYABLE_HTTP_STATUS_CODES
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    return False
 
 
 def _retryable_call(
@@ -32,9 +65,10 @@ def _retryable_call(
 ):
     """Retry call with exponential backoff.
 
-    Only retry on requests.RequestException (network timeout, HTTP errors, etc.);
-    ValueError, RuntimeError and other data format exceptions are raised directly
-    without retry.
+    Only retry retryable exceptions (requests.Timeout, requests.ConnectionError,
+    HTTP 429/500/502/503/504, TimeoutError, ConnectionError); ValueError,
+    RuntimeError, other data format exceptions, and non-retryable HTTP status
+    codes are raised directly without retry.
 
     Parameters:
         func: Function to call
@@ -46,7 +80,9 @@ def _retryable_call(
     for attempt in range(1, max_retries + 1):
         try:
             return func(*args, **kwargs)
-        except requests.RequestException as exc:
+        except Exception as exc:
+            if not _is_retryable_exception(exc):
+                raise
             last_exc = exc
             if attempt < max_retries:
                 delay = min(base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5), max_delay)
@@ -557,6 +593,21 @@ def validate_daily_bars(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     data["date"] = normalized_dates
     return data
 
+
+_jsonl_locks: dict[Path, threading.Lock] = {}
+_jsonl_locks_guard = threading.Lock()
+
+
+def _get_jsonl_lock(log_path: Path) -> threading.Lock:
+    resolved = log_path.resolve()
+    with _jsonl_locks_guard:
+        lock = _jsonl_locks.get(resolved)
+        if lock is None:
+            lock = threading.Lock()
+            _jsonl_locks[resolved] = lock
+        return lock
+
+
 def append_jsonl(records: list[dict], log_path: Path | None = None, key_fields: tuple[str, ...] = ("symbol", "datetime")) -> int:
     """Append records to a JSONL file with deduplication (atomic write).
 
@@ -576,50 +627,53 @@ def append_jsonl(records: list[dict], log_path: Path | None = None, key_fields: 
         return 0
 
     log_path = Path(log_path) if log_path else QUALITY_LOG
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = _get_jsonl_lock(log_path)
 
-    existing = set()
-    existing_lines = []
-    if log_path.exists():
-        with log_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                existing_lines.append(line)
-                try:
-                    item = json.loads(line)
-                    existing.add(tuple(item.get(k) for k in key_fields))
-                except json.JSONDecodeError:
-                    # Damaged line kept, not used for deduplication key judgment
-                    pass
+    with lock:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    new_lines = []
-    for item in records:
-        key = tuple(item.get(k) for k in key_fields)
-        if key in existing:
-            continue
-        existing.add(key)
-        new_lines.append(json.dumps(item, ensure_ascii=False, allow_nan=False))
+        existing = set()
+        existing_lines = []
+        if log_path.exists():
+            with log_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    existing_lines.append(line)
+                    try:
+                        item = json.loads(line)
+                        existing.add(tuple(item.get(k) for k in key_fields))
+                    except json.JSONDecodeError:
+                        # Damaged line kept, not used for deduplication key judgment
+                        pass
 
-    if not new_lines:
-        return 0
+        new_lines = []
+        for item in records:
+            key = tuple(item.get(k) for k in key_fields)
+            if key in existing:
+                continue
+            existing.add(key)
+            new_lines.append(json.dumps(item, ensure_ascii=False, allow_nan=False))
 
-    all_lines = existing_lines + new_lines
-    temp_path = log_path.with_name(log_path.name + ".tmp")
-    try:
-        with temp_path.open("w", encoding="utf-8") as f:
-            for line in all_lines:
-                f.write(line + "\n")
-        temp_path.replace(log_path)
-    except Exception:
+        if not new_lines:
+            return 0
+
+        all_lines = existing_lines + new_lines
+        temp_path = log_path.with_name(log_path.name + ".tmp")
         try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
-        raise
-    return len(new_lines)
+            with temp_path.open("w", encoding="utf-8") as f:
+                for line in all_lines:
+                    f.write(line + "\n")
+            temp_path.replace(log_path)
+        except Exception:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+            raise
+        return len(new_lines)
 
 
 def records_to_csv(records: list[dict], csv_path: Path) -> int:
@@ -1046,90 +1100,184 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
     return count
 
 
+class TaskResult:
+    """Result of one collection task (minute/daily for one symbol).
+
+    Parameters:
+        task_type: "minute" or "daily"
+        symbol: contract/index code, e.g. "V0"
+        status: "success" (ran or skipped) or "failed"
+        error_type: exception class name, if failed
+        error_message: exception message, if failed
+    """
+
+    def __init__(self, task_type, symbol, status, error_type=None, error_message=None):
+        self.task_type = task_type
+        self.symbol = symbol
+        self.status = status
+        self.error_type = error_type
+        self.error_message = error_message
+
+    @property
+    def ok(self) -> bool:
+        return self.status != "failed"
+
+    def __repr__(self):
+        if self.ok:
+            return f"<TaskResult {self.task_type} {self.symbol}: success>"
+        return (
+            f"<TaskResult {self.task_type} {self.symbol}: failed "
+            f"{self.error_type}: {self.error_message}>"
+        )
+
+
+def _run_minute_bars(symbol: str) -> TaskResult:
+    """Run minute-bar collection for one symbol; skip outside trading hours."""
+    try:
+        now = datetime.now(TZ)
+        hhmm = int(now.strftime("%H%M"))
+        weekday = now.weekday()
+        if weekday >= 5 or 1500 <= hhmm < 2100:
+            logger.info(
+                "分钟线 %s：非交易时段（%s），跳过采集",
+                symbol, now.strftime("%H:%M"),
+            )
+            return TaskResult("minute", symbol, "success")
+        minute_df = _retryable_call(ak.futures_zh_minute_sina, symbol=symbol, period="1")
+        if minute_df is None or minute_df.empty:
+            raise RuntimeError(f"{symbol} 分钟数据为空，停止更新。")
+        updated, total = update_minute_bars(symbol, minute_df)
+        logger.info(
+            "分钟线 %s：ACTIVE，本次校验 %d 条；文件累计 %d 条；CSV %s",
+            symbol, updated, total, get_minute_csv(symbol),
+        )
+        return TaskResult("minute", symbol, "success")
+    except ValueError as exc:
+        if "Length mismatch" in str(exc):
+            logger.error(
+                "分钟线 %s：UNKNOWN - 接口返回 Length mismatch，无法确认挂牌状态，类型=%s，消息=%s，允许后续重试",
+                symbol, type(exc).__name__, exc,
+            )
+        else:
+            logger.error(
+                "分钟线 %s：ERROR - 数据格式异常，类型=%s，消息=%s，允许后续重试",
+                symbol, type(exc).__name__, exc,
+            )
+        return TaskResult("minute", symbol, "failed", type(exc).__name__, str(exc))
+    except Exception as exc:
+        logger.error(
+            "分钟线 %s：ERROR - 接口异常，类型=%s，消息=%s，允许后续重试",
+            symbol, type(exc).__name__, exc,
+        )
+        return TaskResult("minute", symbol, "failed", type(exc).__name__, str(exc))
+
+
+def _run_daily_bars(symbol: str) -> TaskResult:
+    """Run daily-bar collection for one symbol; skip before market close."""
+    try:
+        if is_after_market_close():
+            fetch_and_update_daily_bars(symbol, "完整")
+            logger.info(
+                "日线 %s：ACTIVE，采集成功；CSV %s",
+                symbol,
+                f"output/{symbol}_index_daily.csv"
+                if symbol == "H11061"
+                else get_daily_csv(symbol),
+            )
+        else:
+            logger.info("日线 %s：未到采集时间，跳过", symbol)
+        return TaskResult("daily", symbol, "success")
+    except ValueError as exc:
+        if "Length mismatch" in str(exc):
+            logger.error(
+                "日线 %s：UNKNOWN - 接口返回 Length mismatch，无法确认挂牌状态，类型=%s，消息=%s，允许后续重试",
+                symbol, type(exc).__name__, exc,
+            )
+        else:
+            logger.error(
+                "日线 %s：ERROR - 数据格式异常，类型=%s，消息=%s，允许后续重试",
+                symbol, type(exc).__name__, exc,
+            )
+        return TaskResult("daily", symbol, "failed", type(exc).__name__, str(exc))
+    except Exception as exc:
+        logger.error(
+            "日线 %s：ERROR - 接口异常，类型=%s，消息=%s，允许后续重试",
+            symbol, type(exc).__name__, exc,
+        )
+        return TaskResult("daily", symbol, "failed", type(exc).__name__, str(exc))
+
+
+def run_collection(active_contracts=None) -> int:
+    """Run all collection tasks in parallel and summarize failures.
+
+    Returns 0 if every task succeeded (or was skipped), 1 otherwise.
+    ``None`` selects the default ``ACTIVE_CONTRACTS``; ``[]`` submits no tasks.
+    """
+    contracts = ACTIVE_CONTRACTS if active_contracts is None else active_contracts
+
+    # Two data streams are independent, execute in parallel
+    tasks = []
+    for sym in contracts:
+        # 商品期货支持分钟线，跳过指数合约 H11061
+        if sym != "H11061":
+            tasks.append(("minute", sym))
+        tasks.append(("daily", sym))
+
+    if not tasks:
+        logger.info("采集任务为空，未提交任何任务，退出码 0")
+        return 0
+
+    results = []
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        future_map = {}
+        for task_type, sym in tasks:
+            fn = _run_minute_bars if task_type == "minute" else _run_daily_bars
+            future_map[executor.submit(fn, sym)] = (task_type, sym)
+
+        for future in as_completed(future_map):
+            task_type, sym = future_map[future]
+            try:
+                result = future.result()
+            except Exception as exc:  # 未捕获异常兜底
+                logger.error(
+                    "调度器捕获未处理异常：task=%s symbol=%s 类型=%s，消息=%s",
+                    task_type, sym, type(exc).__name__, exc,
+                )
+                result = TaskResult(
+                    task_type, sym, "failed", type(exc).__name__, str(exc)
+                )
+            if result is None:
+                logger.error(
+                    "调度器检测包装函数返回 None：task=%s symbol=%s",
+                    task_type, sym,
+                )
+                result = TaskResult(
+                    task_type, sym, "failed", "NoneResult",
+                    "包装函数意外返回 None",
+                )
+            results.append(result)
+
+    # Summary: log every failure, non-zero exit if any
+    failed = [r for r in results if not r.ok]
+    for r in failed:
+        logger.error(
+            "采集失败汇总：task=%s symbol=%s 类型=%s，原因=%s",
+            r.task_type, r.symbol, r.error_type, r.error_message,
+        )
+    logger.info(
+        "采集汇总：总任务 %d，成功 %d，失败 %d",
+        len(results), len(results) - len(failed), len(failed),
+    )
+    if failed:
+        logger.error("采集任务存在失败，退出码 1")
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     OUT.mkdir(parents=True, exist_ok=True)
-
-    def _run_minute_bars(symbol: str):
-        try:
-            # Skip minute bars during 15:00-21:00 (day session close to night session start)
-            # Minute data is collected only during 09:00-15:00 and 21:00-23:00
-            now = datetime.now(TZ)
-            hhmm = int(now.strftime("%H%M"))
-            weekday = now.weekday()
-            if weekday >= 5 or 1500 <= hhmm < 2100:
-                logger.info(
-                    "分钟线 %s：非交易时段（%s），跳过采集",
-                    symbol, now.strftime("%H:%M"),
-                )
-                return
-            minute_df = _retryable_call(ak.futures_zh_minute_sina, symbol=symbol, period="1")
-            if minute_df is None or minute_df.empty:
-                raise RuntimeError(f"{symbol} 分钟数据为空，停止更新。")
-            updated, total = update_minute_bars(symbol, minute_df)
-            logger.info(
-                "分钟线 %s：ACTIVE，本次校验 %d 条；文件累计 %d 条；CSV %s",
-                symbol, updated, total, get_minute_csv(symbol),
-            )
-        except ValueError as exc:
-            if "Length mismatch" in str(exc):
-                logger.error(
-                    "分钟线 %s：UNKNOWN - 接口返回 Length mismatch，无法确认挂牌状态，类型=%s，消息=%s，允许后续重试",
-                    symbol, type(exc).__name__, exc,
-                )
-            else:
-                logger.error(
-                    "分钟线 %s：ERROR - 数据格式异常，类型=%s，消息=%s，允许后续重试",
-                    symbol, type(exc).__name__, exc,
-                )
-        except Exception as exc:
-            logger.error(
-                "分钟线 %s：ERROR - 接口异常，类型=%s，消息=%s，允许后续重试",
-                symbol, type(exc).__name__, exc,
-            )
-
-    def _run_daily_bars(symbol: str):
-        try:
-            if is_after_market_close():
-                fetch_and_update_daily_bars(symbol, "完整")
-                logger.info(
-                    "日线 %s：ACTIVE，采集成功；CSV %s",
-                    symbol,
-                    f"output/{symbol}_index_daily.csv"
-                    if symbol == "H11061"
-                    else get_daily_csv(symbol),
-                )
-            else:
-                logger.info("日线 %s：未到采集时间，跳过", symbol)
-        except ValueError as exc:
-            if "Length mismatch" in str(exc):
-                logger.error(
-                    "日线 %s：UNKNOWN - 接口返回 Length mismatch，无法确认挂牌状态，类型=%s，消息=%s，允许后续重试",
-                    symbol, type(exc).__name__, exc,
-                )
-            else:
-                logger.error(
-                    "日线 %s：ERROR - 数据格式异常，类型=%s，消息=%s，允许后续重试",
-                    symbol, type(exc).__name__, exc,
-                )
-        except Exception as exc:
-            logger.error(
-                "日线 %s：ERROR - 接口异常，类型=%s，消息=%s，允许后续重试",
-                symbol, type(exc).__name__, exc,
-            )
-
-    # Two data streams are independent, execute in parallel; each symbol's each stream is an independent task
-    tasks = []
-    for sym in ACTIVE_CONTRACTS:
-        # 商品期货支持分钟线，跳过指数合约 H11061
-        if sym != "H11061":
-            tasks.append(("minute", sym, _run_minute_bars))
-        tasks.append(("daily", sym, _run_daily_bars))
-
-    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        futures = [executor.submit(fn, sym) for _, sym, fn in tasks]
-        for future in as_completed(futures):
-            future.result()  # Raise exceptions possibly thrown within tasks (already caught in each function, just confirm completion here)
+    raise SystemExit(run_collection())
