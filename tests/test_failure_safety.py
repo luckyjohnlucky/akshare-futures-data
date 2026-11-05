@@ -221,12 +221,88 @@ class RunCollectionTests(unittest.TestCase):
             self.assertIn("ValueError", joined)
             self.assertIn("length mismatch!", joined)
 
-    # 8. skipped (non-trading-time) tasks are not failures
-    def test_skipped_outside_trading_hours_zero(self):
-        with patch.object(m, "is_after_market_close", return_value=False), \
-             patch.object(m, "fetch_and_update_daily_bars") as mock_fetch:
-            self.assertEqual(m._run_daily_bars("V0").status, "success")
-            mock_fetch.assert_not_called()
+    # 8. daily runs on every trigger (no time gate)
+    def test_daily_runs_before_close(self):
+        with patch.object(m, "fetch_and_update_daily_bars", return_value=2) as mock_fetch:
+            result = m._run_daily_bars("V0")
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.outcome, "success")
+            mock_fetch.assert_called_once_with("V0", "完整")
+
+    def test_daily_changed_returns_success_outcome(self):
+        with patch.object(m, "fetch_and_update_daily_bars", return_value=2):
+            result = m._run_daily_bars("V0")
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.outcome, "success")
+
+    def test_daily_no_new_data_outcome(self):
+        with patch.object(m, "fetch_and_update_daily_bars", return_value=0):
+            result = m._run_daily_bars("V0")
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.outcome, "no_new_data")
+
+    def test_daily_failure_nonzero_via_run_collection(self):
+        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
+             patch.object(m, "_run_daily_bars", wraps=m._run_daily_bars) as wrapped, \
+             patch.object(m, "fetch_and_update_daily_bars", side_effect=RuntimeError("daily boom")):
+            self.assertNotEqual(m.run_collection(["V0"]), 0)
+            wrapped.assert_called_once_with("V0")
+
+    def test_worker_count_is_six(self):
+        import inspect
+        source = inspect.getsource(m.run_collection)
+        self.assertIn("max_workers=6", source)
+
+    def test_run_collection_all_skipped_or_no_new_data(self):
+        """All-skipped/no_new_data tasks: return 0, failed 0, no CSV write."""
+        import itertools
+        minute_results = [
+            m.TaskResult("minute", "V0", "success", outcome="skipped"),
+            m.TaskResult("minute", "TA0", "success", outcome="skipped"),
+        ]
+        daily_results = [
+            m.TaskResult("daily", "V0", "success", outcome="no_new_data"),
+            m.TaskResult("daily", "TA0", "success", outcome="no_new_data"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            before = {p.name: hashlib.md5(p.read_bytes()).hexdigest() for p in tmp_dir.iterdir()}
+            orig_out = m.OUT
+            m.OUT = tmp_dir
+            try:
+                with patch.object(m, "_run_minute_bars", side_effect=itertools.cycle(minute_results)) as mock_m, \
+                     patch.object(m, "_run_daily_bars", side_effect=itertools.cycle(daily_results)) as mock_d, \
+                     patch.object(m, "records_to_csv") as mock_csv, \
+                     patch.object(m, "append_jsonl") as mock_jsonl:
+                    with self.assertLogs(m.logger, level="INFO") as cm:
+                        code = m.run_collection(["V0", "TA0"])
+                self.assertEqual(code, 0)
+                # 2 symbols x (1 minute + 1 daily) = 4 tasks, all collected
+                self.assertEqual(mock_m.call_count, 2)
+                self.assertEqual(mock_d.call_count, 2)
+                joined = " ".join(cm.output)
+                self.assertIn("总任务 4", joined)
+                self.assertIn("成功 0", joined)
+                self.assertIn("无新数据 2", joined)
+                self.assertIn("跳过 2", joined)
+                self.assertIn("失败 0", joined)
+                self.assertNotIn("退出码 1", joined)
+                mock_csv.assert_not_called()
+                mock_jsonl.assert_not_called()
+                after = {p.name: hashlib.md5(p.read_bytes()).hexdigest() for p in tmp_dir.iterdir()}
+                self.assertEqual(before, after)
+            finally:
+                m.OUT = orig_out
+
+    def test_task_result_outcome_compatibility(self):
+        r = m.TaskResult("daily", "V0", "success")
+        self.assertEqual(r.outcome, "success")
+        self.assertTrue(r.ok)
+        r2 = m.TaskResult("daily", "V0", "success", outcome="skipped")
+        self.assertEqual(r2.outcome, "skipped")
+        r3 = m.TaskResult("daily", "V0", "failed", "E", "m", outcome="skipped")
+        self.assertEqual(r3.outcome, "failed")
+        self.assertFalse(r3.ok)
 
     # 9. empty list submits nothing and returns 0
     def test_empty_list_no_tasks_zero(self):

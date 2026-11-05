@@ -987,6 +987,54 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
     return len(data), count
 
 
+class QualityValidationError(ValueError):
+    """Raised when quality validation removes all candidate daily rows."""
+
+
+def _normalize_daily_settle(value):
+    n = number(value)
+    return None if n == 0 else n
+
+
+def _get_field(row, key):
+    try:
+        return row.get(key)
+    except AttributeError:
+        return row[key] if key in row else None
+
+
+def _daily_record_changed(existing, new_row) -> bool:
+    old = (
+        number(existing.get("open")), number(existing.get("high")),
+        number(existing.get("low")), number(existing.get("close")),
+        number(existing.get("volume")), number(existing.get("open_interest")),
+        _normalize_daily_settle(existing.get("settle")),
+        existing.get("quality_status") or "valid",
+    )
+    new = (
+        number(_get_field(new_row, "open")), number(_get_field(new_row, "high")),
+        number(_get_field(new_row, "low")), number(_get_field(new_row, "close")),
+        number(_get_field(new_row, "volume")), number(_get_field(new_row, "hold")),
+        _normalize_daily_settle(_get_field(new_row, "settle")),
+        clean(_get_field(new_row, "quality_status")) or "valid",
+    )
+    return old != new
+
+
+def _index_record_changed(existing, new_row) -> bool:
+    old = (
+        number(existing.get("close")), number(existing.get("settle")),
+        number(existing.get("change")), number(existing.get("pct_change")),
+        existing.get("quality_status") or "valid",
+    )
+    new = (
+        number(_get_field(new_row, "close")), number(_get_field(new_row, "settle")),
+        number(_get_field(new_row, "change")), number(_get_field(new_row, "pct_change")),
+        clean(_get_field(new_row, "quality_status")) or "valid",
+    )
+    return old != new
+
+
 def is_after_day_session_close() -> bool:
     """After day session close, complete daily bars can be collected.
 
@@ -1034,43 +1082,65 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
     Returns:
         新增记录数，失败返回 None
     """
-    # H11061 使用独立指数流程
     if symbol == "H11061":
         try:
-            # 调用 AKShare 接口获取指数日线数据
             daily_df = _retryable_call(ak.futures_index_ccidx, symbol='中证商品期货指数')
             if daily_df is None or daily_df.empty:
                 raise RuntimeError(f"{symbol} 指数数据为空，停止更新。")
-            
-            # 使用独立指数流程：标准化 -> 校验 -> 更新
+
             normalized = normalize_index_daily_bars(daily_df)
-            validated = validate_index_daily_bars(normalized, symbol=symbol)
-            count = update_index_daily_bars(validated, symbol=symbol)
-            
+            index_csv = OUT / f"{symbol}_index_daily.csv"
+            existing_records = csv_to_records(index_csv) if index_csv.exists() else []
+            existing_by_date = {}
+            last_trading_date = None
+            if existing_records:
+                for item in existing_records:
+                    if item.get("trading_date"):
+                        existing_by_date[str(item["trading_date"])] = item
+                if existing_by_date:
+                    last_trading_date = max(existing_by_date)
+            if last_trading_date is not None:
+                candidate = normalized[normalized["trading_date"] >= last_trading_date]
+            else:
+                candidate = normalized
+            if candidate is None or candidate.empty:
+                return 0
+            validated = validate_index_daily_bars(candidate, symbol=symbol)
+            if validated.empty:
+                raise QualityValidationError(f"{symbol} 质量校验移除全部候选记录")
+            changed_rows = []
+            for _, row in validated.iterrows():
+                key = str(row["trading_date"])
+                existing = existing_by_date.get(key)
+                if existing is None or _index_record_changed(existing, row):
+                    changed_rows.append(row)
+            if not changed_rows:
+                logger.info(f"日线 {symbol}（{session_label}）：无变化，跳过写入")
+                return 0
+            changed_df = pd.DataFrame(changed_rows)
+            update_index_daily_bars(changed_df, symbol=symbol)
             logger.info(
-                f"日线 {symbol}（{session_label}）：本次获取 {len(daily_df)} 条；更新结果 {count} 条；CSV output/{symbol}_index_daily.csv",
+                f"日线 {symbol}（{session_label}）：本次变更 {len(changed_rows)} 条；CSV output/{symbol}_index_daily.csv",
             )
-            return count
-            
+            return len(changed_rows)
+
         except Exception as e:
             logger.error(
                 f"日线 {symbol}（{session_label}）：ERROR - 指数数据异常，类型={type(e).__name__}，消息={e}",
             )
             raise
-    
-    # 商品期货使用原有流程
-    # 获取本地已有数据的最新交易日期
+
     existing_csv = get_daily_csv(symbol)
     last_trading_date = None
-    if existing_csv.exists():
-        try:
-            existing_df = pd.read_csv(existing_csv, usecols=['trading_date'])
-            if not existing_df.empty:
-                last_trading_date = existing_df['trading_date'].max()
-        except Exception:
-            last_trading_date = None
+    existing_records = csv_to_records(existing_csv) if existing_csv.exists() else []
+    existing_by_date = {}
+    if existing_records:
+        for item in existing_records:
+            if item.get("trading_date"):
+                existing_by_date[str(item["trading_date"])] = item
+        if existing_by_date:
+            last_trading_date = max(existing_by_date)
 
-    # 调用 AKShare 接口获取日线数据（AKShare 不支持指定日期范围，只能获取全量）
     daily_df = _retryable_call(ak.futures_zh_daily_sina, symbol=symbol)
     if daily_df is None or daily_df.empty:
         raise RuntimeError(f"{symbol} 日线数据为空，停止更新。")
@@ -1080,24 +1150,36 @@ def fetch_and_update_daily_bars(symbol: str, session_label: str) -> Optional[int
     if missing:
         raise ValueError(f"{symbol} 日线数据缺少字段：{sorted(missing)}")
 
-    # 将 date 列转换为字符串格式，便于比较
+    daily_df = daily_df.copy()
     daily_df['date'] = pd.to_datetime(daily_df['date']).dt.strftime('%Y-%m-%d')
 
-    # 增量过滤：只保留比本地最新日期更新的记录
     if last_trading_date is not None:
-        daily_df = daily_df[daily_df['date'] > last_trading_date]
-        if daily_df.empty:
-            logger.info(
-                f"日线 {symbol}（{session_label}）：无新数据（本地最新：{last_trading_date}），跳过采集"
-            )
-            return 0
+        candidate_df = daily_df[daily_df['date'] >= last_trading_date]
+    else:
+        candidate_df = daily_df
+    if candidate_df.empty:
+        return 0
 
-    validated = validate_daily_bars(daily_df, symbol=symbol)
-    count = update_daily_bars(validated, symbol=symbol)
+    validated = validate_daily_bars(candidate_df, symbol=symbol)
+    if validated.empty:
+        raise QualityValidationError(f"{symbol} 质量校验移除全部候选记录")
+    changed_rows = []
+    for _, row in validated.iterrows():
+        key = str(row["date"])
+        existing = existing_by_date.get(key)
+        if existing is None or _daily_record_changed(existing, row):
+            changed_rows.append(row)
+    if not changed_rows:
+        logger.info(
+            f"日线 {symbol}（{session_label}）：无变化（本地最新：{last_trading_date}），跳过采集"
+        )
+        return 0
+    changed_df = pd.DataFrame(changed_rows)
+    update_daily_bars(changed_df, symbol=symbol)
     logger.info(
-        f"日线 {symbol}（{session_label}）：本次获取 {len(daily_df)} 条；更新结果 {count} 条；CSV {get_daily_csv(symbol)}",
+        f"日线 {symbol}（{session_label}）：本次变更 {len(changed_rows)} 条；CSV {get_daily_csv(symbol)}",
     )
-    return count
+    return len(changed_rows)
 
 
 class TaskResult:
@@ -1111,12 +1193,18 @@ class TaskResult:
         error_message: exception message, if failed
     """
 
-    def __init__(self, task_type, symbol, status, error_type=None, error_message=None):
+    def __init__(self, task_type, symbol, status, error_type=None, error_message=None, outcome=None):
         self.task_type = task_type
         self.symbol = symbol
         self.status = status
         self.error_type = error_type
         self.error_message = error_message
+        if status == "failed":
+            self.outcome = "failed"
+        elif outcome in {"no_new_data", "skipped"}:
+            self.outcome = outcome
+        else:
+            self.outcome = "success"
 
     @property
     def ok(self) -> bool:
@@ -1132,17 +1220,8 @@ class TaskResult:
 
 
 def _run_minute_bars(symbol: str) -> TaskResult:
-    """Run minute-bar collection for one symbol; skip outside trading hours."""
+    """Run minute-bar collection for one symbol on every trigger."""
     try:
-        now = datetime.now(TZ)
-        hhmm = int(now.strftime("%H%M"))
-        weekday = now.weekday()
-        if weekday >= 5 or 1500 <= hhmm < 2100:
-            logger.info(
-                "分钟线 %s：非交易时段（%s），跳过采集",
-                symbol, now.strftime("%H:%M"),
-            )
-            return TaskResult("minute", symbol, "success")
         minute_df = _retryable_call(ak.futures_zh_minute_sina, symbol=symbol, period="1")
         if minute_df is None or minute_df.empty:
             raise RuntimeError(f"{symbol} 分钟数据为空，停止更新。")
@@ -1151,7 +1230,7 @@ def _run_minute_bars(symbol: str) -> TaskResult:
             "分钟线 %s：ACTIVE，本次校验 %d 条；文件累计 %d 条；CSV %s",
             symbol, updated, total, get_minute_csv(symbol),
         )
-        return TaskResult("minute", symbol, "success")
+        return TaskResult("minute", symbol, "success", outcome="success")
     except ValueError as exc:
         if "Length mismatch" in str(exc):
             logger.error(
@@ -1173,20 +1252,19 @@ def _run_minute_bars(symbol: str) -> TaskResult:
 
 
 def _run_daily_bars(symbol: str) -> TaskResult:
-    """Run daily-bar collection for one symbol; skip before market close."""
+    """Run daily-bar collection for one symbol on every trigger."""
     try:
-        if is_after_market_close():
-            fetch_and_update_daily_bars(symbol, "完整")
-            logger.info(
-                "日线 %s：ACTIVE，采集成功；CSV %s",
-                symbol,
-                f"output/{symbol}_index_daily.csv"
-                if symbol == "H11061"
-                else get_daily_csv(symbol),
-            )
-        else:
-            logger.info("日线 %s：未到采集时间，跳过", symbol)
-        return TaskResult("daily", symbol, "success")
+        changed = fetch_and_update_daily_bars(symbol, "完整")
+        logger.info(
+            "日线 %s：ACTIVE，采集成功；CSV %s",
+            symbol,
+            f"output/{symbol}_index_daily.csv"
+            if symbol == "H11061"
+            else get_daily_csv(symbol),
+        )
+        if changed == 0:
+            return TaskResult("daily", symbol, "success", outcome="no_new_data")
+        return TaskResult("daily", symbol, "success", outcome="success")
     except ValueError as exc:
         if "Length mismatch" in str(exc):
             logger.error(
@@ -1228,7 +1306,7 @@ def run_collection(active_contracts=None) -> int:
         return 0
 
     results = []
-    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         future_map = {}
         for task_type, sym in tasks:
             fn = _run_minute_bars if task_type == "minute" else _run_daily_bars
@@ -1258,17 +1336,21 @@ def run_collection(active_contracts=None) -> int:
             results.append(result)
 
     # Summary: log every failure, non-zero exit if any
-    failed = [r for r in results if not r.ok]
+    failed = [r for r in results if r.outcome == "failed"]
     for r in failed:
         logger.error(
             "采集失败汇总：task=%s symbol=%s 类型=%s，原因=%s",
             r.task_type, r.symbol, r.error_type, r.error_message,
         )
+    success_count = sum(r.outcome == "success" for r in results)
+    no_new_count = sum(r.outcome == "no_new_data" for r in results)
+    skipped_count = sum(r.outcome == "skipped" for r in results)
+    failed_count = sum(r.outcome == "failed" for r in results)
     logger.info(
-        "采集汇总：总任务 %d，成功 %d，失败 %d",
-        len(results), len(results) - len(failed), len(failed),
+        "采集汇总：总任务 %d，成功 %d，无新数据 %d，跳过 %d，失败 %d",
+        len(results), success_count, no_new_count, skipped_count, failed_count,
     )
-    if failed:
+    if failed_count:
         logger.error("采集任务存在失败，退出码 1")
         return 1
     return 0
