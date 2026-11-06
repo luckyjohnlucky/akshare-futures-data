@@ -7,14 +7,14 @@ Last updated: 2026-11-05
 ## Running locally
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python fetch_pvc.py
 ```
 
 Requirements: `akshare>=1.20,<2.0`, `numpy>=2.0,<3.0`, `pandas>=3.0,<4.0`,
-`requests>=2.31`. Python 3.9+ (virtual environment uses 3.13).
+`requests>=2.31`. Python 3.12 (virtual environment uses 3.12).
 
 Execution order: minute bars stream and daily bars stream are independent and run
 in parallel. A single stream failure does not affect other streams.

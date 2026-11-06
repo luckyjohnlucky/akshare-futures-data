@@ -4,13 +4,13 @@ Collect historical daily and minute bars for nine Chinese commodity futures main
 
 ## Environment
 
-- Python 3.9+ (virtual environment uses Python 3.13)
+- Python 3.12 (virtual environment uses Python 3.12)
 - Dependencies in `requirements.txt`; recommended to use a virtual environment:
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ## Running
