@@ -963,7 +963,7 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
                 "close": number(row["close"]),
                 "volume": number(row["volume"]),
                 "open_interest": number(row["hold"]),
-                "source": "AKShare futures_zh_minute_sina",
+                "source": "AKShare futures_zh_min_sina",
                 "name": SYMBOL_NAME_MAP.get(symbol, "PVC连续"),
             })
         else:
@@ -977,7 +977,7 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
                 "close": number(row["close"]),
                 "volume": number(row["volume"]),
                 "open_interest": number(row["hold"]),
-                "source": "AKShare futures_zh_minute_sina",
+                "source": "AKShare futures_zh_min_sina",
                 "collected_at": collected_at_str,
             }
 
@@ -1222,7 +1222,7 @@ class TaskResult:
 def _run_minute_bars(symbol: str) -> TaskResult:
     """Run minute-bar collection for one symbol on every trigger."""
     try:
-        minute_df = _retryable_call(ak.futures_zh_minute_sina, symbol=symbol, period="1")
+        minute_df = _retryable_call(ak.futures_zh_min_sina, symbol=symbol, period="1")
         if minute_df is None or minute_df.empty:
             raise RuntimeError(f"{symbol} 分钟数据为空，停止更新。")
         updated, total = update_minute_bars(symbol, minute_df)
