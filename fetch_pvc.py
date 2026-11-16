@@ -1293,13 +1293,20 @@ def run_collection(active_contracts=None) -> int:
     """
     contracts = ACTIVE_CONTRACTS if active_contracts is None else active_contracts
 
-    # Two data streams are independent, execute in parallel
+    # Minute bars run on every trigger. Daily bars are only complete and
+    # eligible for collection after the day session closes (15:00-21:00 Beijing).
+    # Avoid ten redundant daily API requests during intraday/night sessions.
+    collect_daily = is_after_day_session_close()
+    if not collect_daily:
+        logger.info("当前不在日线采集窗口（北京时间15:00-21:00），本次仅采集分钟线")
+
     tasks = []
     for sym in contracts:
         # 商品期货支持分钟线，跳过指数合约 H11061
         if sym != "H11061":
             tasks.append(("minute", sym))
-        tasks.append(("daily", sym))
+        if collect_daily:
+            tasks.append(("daily", sym))
 
     if not tasks:
         logger.info("采集任务为空，未提交任何任务，退出码 0")
