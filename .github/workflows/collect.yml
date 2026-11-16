@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: pvc-collect-nine
@@ -34,55 +34,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Check target branch
-        run: |
-          if [ "${GITHUB_REF_TYPE}" != "branch" ]; then
-            echo "ERROR: This workflow must run on git branches. Current: ${GITHUB_REF_NAME} (${GITHUB_REF_TYPE})"
-            exit 1
-          fi
-          echo "Running workflow on branch: ${GITHUB_REF_NAME}"
-      - name: Fetch latest data (minute + daily, independent)
-        run: python fetch_pvc.py
-
-      - name: Commit all data changes
-        run: |
-          # Build list of existing CSV files to add
-          set -e
-          FILES=""
-          for symbol in V0 TA0 MA0 PP0 L0 SA0 FG0 RB0 HC0; do
-            if [ -f "output/${symbol}_minute_bars.csv" ]; then
-              FILES+=" output/${symbol}_minute_bars.csv"
-            fi
-            if [ -f "output/${symbol}_daily_bars.csv" ]; then
-              FILES+=" output/${symbol}_daily_bars.csv"
-            fi
-          done
-          
-          # H11061: collect new index daily and minute placeholder
-          if [ -f "output/H11061_index_daily.csv" ]; then
-            FILES+=" output/H11061_index_daily.csv"
-          fi
-          if [ -f "output/H11061_minute_bars.csv" ]; then
-            FILES+=" output/H11061_minute_bars.csv"
-          fi
-
-          if [ -z "$FILES" ]; then
-            echo "No CSV files found to add."
-          else
-            git add $FILES
-            if git diff --quiet --cached; then
-              echo "No data changes; nothing to commit."
-            else
-              git commit -m "chore: auto-collect commodity futures data ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-              git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
-            fi
-          fi
 
       - name: Upload GitHub Pages artifact
         if: github.ref == 'refs/heads/main'
