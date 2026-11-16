@@ -1219,6 +1219,28 @@ class TaskResult:
         )
 
 
+
+def _timed_task(task_type: str):
+    """Log the wall-clock duration and outcome of each collection task."""
+    def decorate(func):
+        def wrapped(symbol: str):
+            started_at = time.perf_counter()
+            result = None
+            try:
+                result = func(symbol)
+                return result
+            finally:
+                elapsed = time.perf_counter() - started_at
+                outcome = getattr(result, "outcome", "exception")
+                logger.info(
+                    "采集耗时：task=%s symbol=%s duration=%.2fs outcome=%s",
+                    task_type, symbol, elapsed, outcome,
+                )
+        return wrapped
+    return decorate
+
+
+@_timed_task("minute")
 def _run_minute_bars(symbol: str) -> TaskResult:
     """Run minute-bar collection for one symbol on every trigger."""
     try:
@@ -1251,6 +1273,7 @@ def _run_minute_bars(symbol: str) -> TaskResult:
         return TaskResult("minute", symbol, "failed", type(exc).__name__, str(exc))
 
 
+@_timed_task("daily")
 def _run_daily_bars(symbol: str) -> TaskResult:
     """Run daily-bar collection for one symbol on every trigger."""
     try:
