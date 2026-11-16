@@ -1313,7 +1313,7 @@ def run_collection(active_contracts=None) -> int:
         return 0
 
     results = []
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         future_map = {}
         for task_type, sym in tasks:
             fn = _run_minute_bars if task_type == "minute" else _run_daily_bars
