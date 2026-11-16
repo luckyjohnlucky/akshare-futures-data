@@ -159,13 +159,15 @@ class RunCollectionTests(unittest.TestCase):
 
     # 1. all succeed
     def test_all_success_returns_zero(self):
-        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
+        with patch.object(m, "is_after_day_session_close", return_value=True), \
+             patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
              patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "V0", "success")):
             self.assertEqual(m.run_collection(["V0"]), 0)
 
     # 2. single daily failure
     def test_single_daily_failure_nonzero(self):
-        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
+        with patch.object(m, "is_after_day_session_close", return_value=True), \
+             patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
              patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "V0", "failed", "RuntimeError", "daily boom")):
             self.assertNotEqual(m.run_collection(["V0"]), 0)
 
@@ -177,7 +179,8 @@ class RunCollectionTests(unittest.TestCase):
 
     # 4. multiple failures all collected
     def test_multiple_failures_all_collected(self):
-        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "failed", "E1", "m1")), \
+        with patch.object(m, "is_after_day_session_close", return_value=True), \
+             patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "failed", "E1", "m1")), \
              patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "V0", "failed", "E2", "m2")):
             with self.assertLogs(m.logger, level="ERROR") as cm:
                 code = m.run_collection(["V0"])
@@ -194,7 +197,8 @@ class RunCollectionTests(unittest.TestCase):
             return m.TaskResult("minute", sym, "success")
         def daily_fail(sym):
             return m.TaskResult("daily", sym, "failed", "RuntimeError", "bad")
-        with patch.object(m, "_run_minute_bars", side_effect=minute_ok), \
+        with patch.object(m, "is_after_day_session_close", return_value=True), \
+             patch.object(m, "_run_minute_bars", side_effect=minute_ok), \
              patch.object(m, "_run_daily_bars", side_effect=daily_fail):
             self.assertNotEqual(m.run_collection(["V0"]), 0)
 
@@ -202,7 +206,8 @@ class RunCollectionTests(unittest.TestCase):
     def test_uncaught_future_exception_caught(self):
         def boom(sym):
             raise RuntimeError("uncradle boom")
-        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
+        with patch.object(m, "is_after_day_session_close", return_value=True), \
+             patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
              patch.object(m, "_run_daily_bars", side_effect=boom):
             with self.assertLogs(m.logger, level="ERROR") as cm:
                 code = m.run_collection(["V0"])
@@ -211,7 +216,8 @@ class RunCollectionTests(unittest.TestCase):
 
     # 7. log contains task type, symbol, error type and message
     def test_log_contains_type_symbol_exc_and_msg(self):
-        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "TA0", "success")), \
+        with patch.object(m, "is_after_day_session_close", return_value=True), \
+             patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "TA0", "success")), \
              patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "TA0", "failed", "ValueError", "length mismatch!")):
             with self.assertLogs(m.logger, level="ERROR") as cm:
                 self.assertNotEqual(m.run_collection(["TA0"]), 0)
@@ -242,11 +248,20 @@ class RunCollectionTests(unittest.TestCase):
             self.assertEqual(result.outcome, "no_new_data")
 
     def test_daily_failure_nonzero_via_run_collection(self):
-        with patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
+        with patch.object(m, "is_after_day_session_close", return_value=True), \
+             patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")), \
              patch.object(m, "_run_daily_bars", wraps=m._run_daily_bars) as wrapped, \
              patch.object(m, "fetch_and_update_daily_bars", side_effect=RuntimeError("daily boom")):
             self.assertNotEqual(m.run_collection(["V0"]), 0)
             wrapped.assert_called_once_with("V0")
+
+    def test_daily_tasks_are_skipped_before_day_close(self):
+        with patch.object(m, "is_after_day_session_close", return_value=False), \
+             patch.object(m, "_run_minute_bars", return_value=m.TaskResult("minute", "V0", "success")) as mock_m, \
+             patch.object(m, "_run_daily_bars") as mock_d:
+            self.assertEqual(m.run_collection(["V0", "TA0"]), 0)
+            self.assertEqual(mock_m.call_count, 2)
+            mock_d.assert_not_called()
 
     def test_worker_count_is_six(self):
         import inspect
@@ -270,7 +285,8 @@ class RunCollectionTests(unittest.TestCase):
             orig_out = m.OUT
             m.OUT = tmp_dir
             try:
-                with patch.object(m, "_run_minute_bars", side_effect=itertools.cycle(minute_results)) as mock_m, \
+                with patch.object(m, "is_after_day_session_close", return_value=True), \
+                     patch.object(m, "_run_minute_bars", side_effect=itertools.cycle(minute_results)) as mock_m, \
                      patch.object(m, "_run_daily_bars", side_effect=itertools.cycle(daily_results)) as mock_d, \
                      patch.object(m, "records_to_csv") as mock_csv, \
                      patch.object(m, "append_jsonl") as mock_jsonl:
@@ -314,7 +330,8 @@ class RunCollectionTests(unittest.TestCase):
 
     # 10. wrapper returning None is a failure
     def test_none_result_is_failure(self):
-        with patch.object(m, "_run_minute_bars", return_value=None), \
+        with patch.object(m, "is_after_day_session_close", return_value=True), \
+             patch.object(m, "_run_minute_bars", return_value=None), \
              patch.object(m, "_run_daily_bars", return_value=m.TaskResult("daily", "V0", "success")):
             with self.assertLogs(m.logger, level="ERROR") as cm:
                 code = m.run_collection(["V0"])
