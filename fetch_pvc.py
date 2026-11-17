@@ -77,15 +77,32 @@ def _retryable_call(
         max_delay: Maximum delay in seconds
     """
     last_exc = None
+    api_seconds = 0.0
+    retry_wait_seconds = 0.0
+    attempts = 0
     for attempt in range(1, max_retries + 1):
+        attempts = attempt
+        call_started = time.perf_counter()
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            api_seconds += time.perf_counter() - call_started
+            logger.info(
+                "接口耗时：api=%s attempts=%d request_duration=%.2fs retry_wait=%.2fs outcome=success",
+                func.__name__, attempts, api_seconds, retry_wait_seconds,
+            )
+            return result
         except Exception as exc:
+            api_seconds += time.perf_counter() - call_started
             if not _is_retryable_exception(exc):
+                logger.info(
+                    "接口耗时：api=%s attempts=%d request_duration=%.2fs retry_wait=%.2fs outcome=failed",
+                    func.__name__, attempts, api_seconds, retry_wait_seconds,
+                )
                 raise
             last_exc = exc
             if attempt < max_retries:
                 delay = min(base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5), max_delay)
+                retry_wait_seconds += delay
                 logger.warning(
                     "调用 %s 失败（第 %d/%d 次）：%s，%.1f 秒后重试",
                     func.__name__, attempt, max_retries, exc, delay,
@@ -96,6 +113,10 @@ def _retryable_call(
                     "调用 %s 失败（已达最大重试 %d 次）：%s",
                     func.__name__, max_retries, exc,
                 )
+    logger.info(
+        "接口耗时：api=%s attempts=%d request_duration=%.2fs retry_wait=%.2fs outcome=failed",
+        func.__name__, attempts, api_seconds, retry_wait_seconds,
+    )
     raise last_exc
 
 
@@ -932,15 +953,23 @@ def filter_future_anomalies(
 
 
 def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
+    stage_started = time.perf_counter()
     data = validate_minute_bars(df)
+    validation_seconds = time.perf_counter() - stage_started
+
+    stage_started = time.perf_counter()
     collected_at = datetime.now(TZ)
     data = separate_future_timestamps(data, symbol, collected_at)
-    minute_csv = get_minute_csv(symbol)
-    old_records = []
+    future_filter_seconds = time.perf_counter() - stage_started
 
+    minute_csv = get_minute_csv(symbol)
+    stage_started = time.perf_counter()
+    old_records = []
     if minute_csv.exists():
         old_records = csv_to_records(minute_csv)
+    csv_read_seconds = time.perf_counter() - stage_started
 
+    stage_started = time.perf_counter()
     records = {}
     for item in old_records:
         if not isinstance(item, dict) or not item.get("symbol") or not item.get("datetime"):
@@ -980,10 +1009,25 @@ def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
                 "source": "AKShare futures_zh_min_sina",
                 "collected_at": collected_at_str,
             }
+    merge_seconds = time.perf_counter() - stage_started
 
+    stage_started = time.perf_counter()
     merged = sorted(records.values(), key=lambda x: (x["symbol"], x["datetime"]))
     merged = filter_future_anomalies(merged)
+    sort_filter_seconds = time.perf_counter() - stage_started
+
+    stage_started = time.perf_counter()
     count = records_to_csv(merged, minute_csv)
+    csv_write_seconds = time.perf_counter() - stage_started
+
+    logger.info(
+        "分钟线处理耗时：symbol=%s input_rows=%d old_rows=%d output_rows=%d "
+        "validate=%.2fs future_filter=%.2fs csv_read=%.2fs merge=%.2fs "
+        "sort_filter=%.2fs csv_write=%.2fs",
+        symbol, len(df), len(old_records), count,
+        validation_seconds, future_filter_seconds, csv_read_seconds,
+        merge_seconds, sort_filter_seconds, csv_write_seconds,
+    )
     return len(data), count
 
 
