@@ -849,6 +849,41 @@ def parse_market_datetime(value: Any, tz: ZoneInfo = TZ) -> pd.Timestamp:
         ts = ts.tz_convert(tz)
     return ts
 
+def _parse_market_datetime_series(values: pd.Series) -> pd.Series:
+    """Vectorized equivalent of parse_market_datetime for a timestamp series."""
+    text_values = values.astype("string")
+    aware_mask = text_values.str.contains(
+        r"(?:Z|[+-]\d{2}:?\d{2})$",
+        case=False,
+        na=False,
+    )
+    parsed = pd.Series(
+        pd.NaT,
+        index=values.index,
+        dtype="datetime64[ns, Asia/Shanghai]",
+    )
+
+    naive_values = pd.to_datetime(text_values[~aware_mask], errors="coerce")
+    if not naive_values.empty:
+        valid_naive = naive_values.notna()
+        if valid_naive.any():
+            parsed.loc[naive_values.index[valid_naive]] = (
+                naive_values.loc[valid_naive].dt.tz_localize(TZ)
+            )
+
+    aware_values = pd.to_datetime(
+        text_values[aware_mask], errors="coerce", utc=True
+    )
+    if not aware_values.empty:
+        valid_aware = aware_values.notna()
+        if valid_aware.any():
+            parsed.loc[aware_values.index[valid_aware]] = (
+                aware_values.loc[valid_aware].dt.tz_convert(TZ)
+            )
+
+    return parsed
+
+
 def separate_future_timestamps(
     data: pd.DataFrame,
     symbol: str,
@@ -872,17 +907,13 @@ def separate_future_timestamps(
         return data.copy()
 
     threshold = pd.Timestamp(collected_at) + FUTURE_TIMESTAMP_TOLERANCE
-    future_records = []
-    keep_mask = []
+    bar_times = _parse_market_datetime_series(data["datetime"])
+    future_mask = bar_times.notna() & bar_times.gt(threshold)
 
-    for _, row in data.iterrows():
-        bar_dt = parse_market_datetime(row["datetime"])
-        if pd.isna(bar_dt):
-            # Unparseable timestamps are not judged in this function, kept to maintain original behavior.
-            keep_mask.append(True)
-            continue
-        if bar_dt > threshold:
-            future_records.append({
+    if future_mask.any():
+        future_data = data.loc[future_mask]
+        future_records = [
+            {
                 "symbol": symbol,
                 "datetime": row["datetime"],
                 "open": number(row["open"]),
@@ -893,15 +924,12 @@ def separate_future_timestamps(
                 "open_interest": number(row["hold"]),
                 "collected_at": collected_at.isoformat(),
                 "issue": "future_timestamp",
-            })
-            keep_mask.append(False)
-        else:
-            keep_mask.append(True)
-
-    if future_records:
+            }
+            for _, row in future_data.iterrows()
+        ]
         append_jsonl(future_records, log_path)
 
-    valid = data[keep_mask].copy()
+    valid = data.loc[~future_mask].copy()
     return valid.sort_values("datetime").reset_index(drop=True)
 
 
@@ -923,33 +951,45 @@ def filter_future_anomalies(
     - The same (symbol, datetime) anomaly record is not written repeatedly to the log.
     - Records missing available time pairs (datetime/collected_at) are kept as-is.
     """
-    kept = []
-    anomalies = []
-    for item in records:
-        bar_dt = parse_market_datetime(item.get("datetime"))
-        coll_dt = parse_market_datetime(item.get("collected_at"))
-        if pd.isna(bar_dt) or pd.isna(coll_dt):
-            kept.append(item)
-            continue
-        if bar_dt > coll_dt + FUTURE_TIMESTAMP_TOLERANCE:
-            anomalies.append({
-                "symbol": item.get("symbol"),
-                "datetime": item.get("datetime"),
-                "open": item.get("open"),
-                "high": item.get("high"),
-                "low": item.get("low"),
-                "close": item.get("close"),
-                "volume": item.get("volume"),
-                "open_interest": item.get("open_interest"),
-                "collected_at": item.get("collected_at"),
-                "issue": "future_timestamp",
-            })
-        else:
-            kept.append(item)
+    if not records:
+        return []
+
+    bar_values = pd.Series([item.get("datetime") for item in records], dtype="string")
+    collected_values = pd.Series(
+        [item.get("collected_at") for item in records], dtype="string"
+    )
+    bar_times = _parse_market_datetime_series(bar_values)
+    collected_times = _parse_market_datetime_series(collected_values)
+    anomaly_mask = (
+        bar_times.notna()
+        & collected_times.notna()
+        & bar_times.gt(collected_times + FUTURE_TIMESTAMP_TOLERANCE)
+    ).to_numpy()
+
+    anomalies = [
+        {
+            "symbol": item.get("symbol"),
+            "datetime": item.get("datetime"),
+            "open": item.get("open"),
+            "high": item.get("high"),
+            "low": item.get("low"),
+            "close": item.get("close"),
+            "volume": item.get("volume"),
+            "open_interest": item.get("open_interest"),
+            "collected_at": item.get("collected_at"),
+            "issue": "future_timestamp",
+        }
+        for item, is_anomaly in zip(records, anomaly_mask)
+        if is_anomaly
+    ]
 
     if anomalies:
         append_jsonl(anomalies, log_path)
-    return kept
+    return [
+        item
+        for item, is_anomaly in zip(records, anomaly_mask)
+        if not is_anomaly
+    ]
 
 
 def update_minute_bars(symbol: str, df: pd.DataFrame) -> tuple[int, int]:
